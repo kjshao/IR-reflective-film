@@ -195,17 +195,48 @@
 
 | 方法 | 全称 | 适用结构 | 速度 | 精度 | 典型工具 |
 |------|------|---------|------|------|---------|
-| **TMM** | 传输矩阵法 | 1D 平面多层，法向/斜入射 | 极快 | 高（解析） | Macleod, OpenFilters, tmm, PyTMM |
+| **TMM** | 传输矩阵法 | 1D 平面多层，法向/斜入射 | 极快 | 高（解析） | TFCalc, Essential Macleod, OpenFilters, tmm, PyTMM |
 | **STACK** | 堆栈解析求解 | 均匀平面多层 | 极快 | 高 | Lumerical STACK |
 | **RCWA** | 严格耦合波分析 | 周期结构（光栅、光子晶体） | 快 | 高 | Lumerical RCWA, grcwa (Python) |
 | **FDTD** | 时域有限差分 | 任意几何、宽带、非均匀 | 慢 | 高（数值） | Lumerical FDTD, Tidy3D, MEEP |
+| **FEM** | 有限元法 | 任意 2D/3D 几何（频域） | 慢 | 高（数值） | COMSOL, JCMsuite |
 
 **手机屏幕 IR 反射膜的主流仿真路径**：
 
-- **DMD / 全介质镀膜** → **TMM**（工业标准，Essential Macleod 等）
+- **DMD / 全介质镀膜** → **TMM**（工业标准，TFCalc、Essential Macleod 等）
 - **聚合物 MOF（平面）** → **TMM**（各层视为均匀介质，n 取有效折射率）
 - **结构化 MOF / 微棱镜** → **RCWA** 或 **FDTD**
 - **斜入射、大角度响应** → TMM 斜入射模式 或 RCWA
+
+TMM 与 STACK 同属平面多层的解析/半解析求解；FDTD 与 FEM（Finite Element Method，有限元法）同属全波数值求解。RCWA 在周期假设下严格求解麦克斯韦方程，介于二者之间。
+
+### 4.1.1 TFCalc 中的仿真方法
+
+**TFCalc 不做全波求解。** 它是光学镀膜设计软件，核心是平面多层膜上的特征矩阵 / 传输矩阵（TMM），在「横向无限大、每层均匀、平面波入射」假设下解析计算膜系响应。
+
+TFCalc 可计算与优化的量包括：反射率、透过率、吸收、光密度、损耗、相位、ψ、电场强度（EFI，Electric Field Intensity）、导纳、色度，以及超快光学量 GD（Group Delay，群延迟）、GDD（Group Delay Dispersion，群延迟色散）。薄膜层通常按相干叠加；基板背面反射可按非相干处理。入射可为单角度、锥角或用户定义角分布。渐变折射率 / rugate 膜用多层变折射率近似。设计侧提供局部优化（Variable Metric、Gradient、Simplex）、全局搜索与 Needle 优化。
+
+这些能力都属于 TMM 镀膜设计，**不能**替代 FDTD / FEM 对横向不均匀、衍射或三维散射的建模。
+
+### 4.1.2 TMM 与全波求解的区别、准确性与是否需要全波
+
+**TMM**（含 TFCalc、Essential Macleod、STACK）把麦克斯韦方程在沿膜厚方向分层、横向均匀的结构上化为 2×2 传输矩阵（或特征矩阵）连乘，得到 R(λ)、T(λ)。斜入射时对 s/p 偏振分别计算，仍是一维问题。
+
+**全波求解**（FDTD、频域 FEM）在 2D/3D 网格上直接离散麦克斯韦方程，可处理横向不均匀、衍射、散射与有限尺寸。RCWA 则对周期结构做傅里叶展开后严格求解。
+
+| | TMM / TFCalc | 全波（FDTD / FEM） | RCWA |
+|--|--|--|--|
+| 几何 | 平面均匀多层 | 任意 2D/3D | 周期微结构 |
+| 方程 | 1D 分层的解析/半解析解 | 离散麦克斯韦 | 周期麦克斯韦 + 傅里叶 |
+| 速度 | 极快 | 慢 | 中等 |
+| 侧向散射/衍射 | 不建模 | 能建模 | 能建模（周期） |
+| 粗糙、岛状金属、纳米线 | 只能用等效 n、k | 可直接建模 | 视是否周期而定 |
+
+对**理想平面多层膜**，TMM 就是该几何下麦克斯韦问题的精确解，不是工程简化。全波在网格足够密、色散模型一致时，应与 TMM **重合**。平面多层上偏差 **>1%** 时，优先检查材料 n(λ)、k(λ) 或网格精度，而不是先怀疑 TMM。
+
+TMM 与实测的偏差通常来自**模型假设**（层厚、色散数据、界面互扩散、粗糙度、金属是否连续成膜、基板非相干处理），而不是矩阵算法本身。全波若未把真实三维形貌与材料数据建入，同样消除不了这些误差。
+
+**多数 IR 反射膜设计不需要全波。** DMD、全介质堆、平面聚合物 MOF 用 TFCalc 等 TMM 工具即可，也是工业首选。斜入射、大角度同样用 TMM 的斜入射模式。需要全波或 RCWA 的情形包括：光栅、微棱镜、菲涅尔型结构化 MOF；Ag 纳米线、岛状/不连续金属、明显粗糙或散射；有限孔径、边缘、像素级 3D 结构；需要近场热点或非平面等离激元。对平面多层，全波主要用于与 TMM 交叉验证 R/T，不是设计主路径；厚度优化、公差与制程仍应在 TMM 工具中完成。
 
 ---
 
@@ -213,7 +244,7 @@
 
 TMM 是设计 DMD 和介质膜堆的**首选方法**。其核心是对每一层建立 2×2 传输矩阵，连乘得到整个膜系的反射率 R(λ) 和透过率 T(λ)。
 
-#### 4.2.1 仿真流程（以 Essential Macleod 为例）
+#### 4.2.1 仿真流程（以 TFCalc / Essential Macleod 为例）
 
 ```
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
@@ -251,7 +282,7 @@ TMM 是设计 DMD 和介质膜堆的**首选方法**。其核心是对每一层�
 
 **Step 4 — 运行优化（Refinement）**
 
-- Macleod：`Refinement → Target → Generate Target`，设定各波段权重
+- TFCalc / Macleod：设定各波段目标与权重后做局部或 Needle 优化（Macleod 中为 `Refinement → Target → Generate Target`）
 - 优化变量：各层厚度（材料固定）或同时优化材料组合
 - 约束：Ag 厚度 8–20 nm，ITO 单层 20–100 nm
 - 输出：最优厚度组合及预测 R(λ)、T(λ) 曲线
@@ -301,6 +332,7 @@ for wl in wavelengths * 1e-9:
 
 | 工具 | 类型 | 说明 |
 |------|------|------|
+| TFCalc | 商业 | 平面多层 TMM 设计与优化（R/T/A、相位、EFI、Needle 等），不做全波 |
 | Essential Macleod | 商业 | 工业薄膜设计标准，DMD/MOF 优化 |
 | OpenFilters | 开源 | Python GUI（Graphical User Interface，图形用户界面），支持 TMM + 优化 |
 | tmm / PyTMM | 开源库 | Python/MATLAB TMM 实现 |
@@ -339,7 +371,7 @@ for wl in wavelengths * 1e-9:
 
 **工具**：Lumerical FDTD、Tidy3D（云加速）、MEEP（开源）
 
-> **选型建议**：TMM 与 FDTD 结果在平面多层膜上应一致；若偏差 >1%，检查材料色散数据或网格精度。
+> **选型建议**：对平面多层，TMM（含 TFCalc）与 FDTD 结果应一致；若偏差 >1%，检查材料色散数据或网格精度。全波用于复杂三维验证，不替代 TMM 设计主路径。见 §4.1.2。
 
 ---
 
@@ -424,6 +456,7 @@ for wl in wavelengths * 1e-9:
 6. 盖板 IR-cut 抗反射镀膜 — US Patent 10,830,930
 7. TMM 教程 — [OghmaNano Optical Filter Tutorial](https://www.oghma-nano.com/manual/tutorial-optical-filter.html)
 8. 材料折射率数据库 — [RefractiveIndex.info](https://refractiveindex.info)
+9. TFCalc 功能说明 — [Software Spectra / Hulinks TFCalc](https://www.sspectra.com/summary.html)
 
 ---
 
@@ -489,10 +522,14 @@ for wl in wavelengths * 1e-9:
 
 | 缩略词 | 英文全称 | 中文说明 |
 |--------|---------|---------|
-| TMM | Transfer Matrix Method | 传输矩阵法，平面多层膜光学计算的首选方法 |
+| TMM | Transfer Matrix Method | 传输矩阵法，平面多层膜光学计算的首选方法；TFCalc 等镀膜软件的核心算法 |
 | STACK | — | Lumerical 等工具中的堆栈解析求解器，适用于均匀平面多层 |
 | RCWA | Rigorous Coupled-Wave Analysis | 严格耦合波分析，适用于光栅、光子晶体等周期微结构 |
-| FDTD | Finite-Difference Time-Domain | 时域有限差分，适用于任意三维几何与宽带响应 |
+| FDTD | Finite-Difference Time-Domain | 时域有限差分，全波数值方法，适用于任意三维几何与宽带响应 |
+| FEM | Finite Element Method | 有限元法，此处指频域全波求解 |
+| EFI | Electric Field Intensity | 膜系内电场强度，TFCalc 等可计算 |
+| GD | Group Delay | 群延迟 |
+| GDD | Group Delay Dispersion | 群延迟色散 |
 | TE / TM | Transverse Electric / Transverse Magnetic | 横电 / 横磁偏振 |
 | PML | Perfectly Matched Layer | 完美匹配层，FDTD 中的吸收边界条件 |
 | GUI | Graphical User Interface | 图形用户界面 |
@@ -504,7 +541,8 @@ for wl in wavelengths * 1e-9:
 | NITS | Near-Infrared Transmission System | 3M 近红外透过系统：一组光学膜，使 NIR 相机可透过 LCD 成像，用于屏下指纹或面容识别 |
 | UCSF | Ultra Clear Solar Film | 3M 超透明太阳能膜：可见光高透、近红外高反的聚合物多层膜 |
 | IDTMF | Industrial Display Thermal Management Film | 3M 工业显示热管理膜：非含金属多层膜，用于降低太阳热负载 |
+| TFCalc | — | Software Spectra 的多层光学薄膜设计软件，基于 TMM，不做全波求解 |
 
 ---
 
-*文档版本：v1.1 | 更新日期：2026-08-18*
+*文档版本：v1.2 | 更新日期：2026-08-19*
