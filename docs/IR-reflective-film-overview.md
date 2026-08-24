@@ -208,6 +208,8 @@
 - **结构化 MOF / 微棱镜** → **RCWA** 或 **FDTD**
 - **斜入射、大角度响应** → TMM 斜入射模式 或 RCWA
 
+使用 OghmaNano 建立 400–700 nm 透射、700–1300 nm 反射的实际工程步骤、OMOMO 起始厚度及可复现计算结果，见 [OghmaNano 红外反射膜仿真实操](oghmanano-ir-film-simulation.md)。
+
 TMM 与 STACK 同属平面多层的解析/半解析求解；FDTD 与 FEM（Finite Element Method，有限元法）同属全波数值求解。RCWA 在周期假设下严格求解麦克斯韦方程，介于二者之间。
 
 ### 4.1.1 TFCalc 中的仿真方法

@@ -5,6 +5,15 @@
 ## 文档
 
 - [IR 反射膜制备方案、结构与仿真指南](docs/IR-reflective-film-overview.md) — 涵盖 DMD、全介质膜堆、聚合物 MOF 等常见制备路线，以及 TMM / RCWA / FDTD 仿真流程；说明 TFCalc 基于 TMM、与全波求解的区别及是否需要全波。文中缩略词均给出中英文全称，并附分类对照表。
+- [OghmaNano 红外反射膜仿真实操](docs/oghmanano-ir-film-simulation.md) — 以 400–700 nm 透射、700–1300 nm 反射为目标，给出 OMOMO 起始膜系、软件设置、材料导入、参数扫描和可复现的角度谱结果。
+
+## 可复现仿真
+
+```bash
+python3 sim/design.py
+```
+
+脚本仅使用 Python 标准库，输出 OMO / OMOMO / 全介质基线的 R/T 光谱及 OghmaNano 示例材料文件。
 
 ## 主要内容
 
