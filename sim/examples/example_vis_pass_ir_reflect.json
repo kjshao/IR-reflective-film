@@ -1,0 +1,49 @@
+{
+  "incident_angle_deg": 0,
+  "polarization": "unpolarized",
+  "incident_medium": "air",
+  "substrate": "glass",
+  "substrate_thickness_m": 0.0007,
+  "exit_medium": "air",
+  "substrate_model": "semi_infinite",
+  "rt_engine": "tmm",
+  "comment": "Example targets: 420-700 nm T>=94% & R<=2%; 780-1800 nm R>=50%. Defaults: air/SiO2/TiO2/glass. Set rt_engine=external and external_command with {input}/{output} to plug in another R/T solver.",
+  "seed": {
+    "type": "chirped_qw",
+    "centres_nm": [850, 1100, 1400, 1650],
+    "periods_per_centre": 3,
+    "cell": ["tio2", "sio2"]
+  },
+  "bands": [
+    {
+      "wavelength_nm": [420, 700],
+      "T_min": 0.94,
+      "R_max": 0.02,
+      "R_target": 0.0,
+      "T_target": 0.97,
+      "weight": 2.0
+    },
+    {
+      "wavelength_nm": [780, 1800],
+      "R_min": 0.50,
+      "R_target": 0.70,
+      "weight": 1.0
+    }
+  ],
+  "optimizer": {
+    "method": "lm",
+    "use_needle": true,
+    "thickness_weight": 0.01,
+    "wavelength_step_nm": 20,
+    "max_layers": 40,
+    "max_add_rounds": 8,
+    "max_iter": 40,
+    "high_index": "tio2",
+    "low_index": "sio2",
+    "lambda0": 0.01,
+    "fd_step_nm": 1.0
+  },
+  "plot_wavelength_nm": [400, 1800],
+  "plot_step_nm": 5,
+  "output_dir": "../out/optimize_example"
+}

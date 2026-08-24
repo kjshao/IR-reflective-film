@@ -1,0 +1,2 @@
+# Optional dependencies for sim/optimize_film.py
+matplotlib>=3.5

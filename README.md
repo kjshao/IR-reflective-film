@@ -15,6 +15,18 @@ python3 sim/design.py
 
 脚本仅使用 Python 标准库，输出 OMO / OMOMO / 全介质基线的 R/T 光谱及 OghmaNano 示例材料文件。
 
+## 薄膜结构自动优化
+
+详见 **[sim/README.md](sim/README.md)**（输入格式、模块说明、外部 R/T 接口与示例）。
+
+```bash
+python3 -m venv sim/.venv
+sim/.venv/bin/pip install -r sim/requirements.txt
+sim/.venv/bin/python sim/optimize_film.py sim/examples/example_vis_pass_ir_reflect.json
+```
+
+示例目标：420–700 nm 透射率 ≥94%、反射率 ≤2%；780–1800 nm 反射率 ≥50%。结果写入 `sim/out/optimize_example/`。
+
 ## 主要内容
 
 | 主题 | 说明 |
