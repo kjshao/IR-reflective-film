@@ -529,8 +529,7 @@ def make_optimizer_from_config(
         adam_max_step=cfg.get("adam_max_step", 10e-9),
         mini_batch=bool(cfg.get("mini_batch", False)),
         batch_size=int(cfg.get("batch_size", 8)),
-        sample_stride=int(cfg.get("sample_stride", cfg.get("sample_interval", 1))),
-        batch_gap=int(cfg.get("batch_gap", cfg.get("batch_interval", 0))),
+        n_batches=cfg.get("n_batches"),
         n_epochs=cfg.get("n_epochs"),
         shuffle_seed=cfg.get("shuffle_seed"),
     )

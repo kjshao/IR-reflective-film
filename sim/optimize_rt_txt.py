@@ -23,10 +23,11 @@ Training modes (``method=adam``):
 
   - **full grid** (default): each iteration uses the full wavelength grid.
   - **mini-batch**: set ``mini_batch`` true or to an object with
-    ``batch_size``, ``sample_stride`` (uniform sampling interval),
-    ``batch_gap`` (extra gap between batches), optional ``n_epochs`` /
-    ``shuffle_seed``. Each epoch builds all batches, shuffles them, and
-    takes one Adam step per batch; full-grid cost is recorded per epoch.
+    ``batch_size``, ``n_batches``, optional ``n_epochs`` / ``shuffle_seed``.
+    Each epoch draws ``n_batches`` batches; every batch picks a random float
+    start in ``[λ_min, λ_max)`` and takes ``batch_size`` points spaced by
+    ``(λ_max−λ_min)/batch_size``, wrapping at ``λ_max`` back to ``λ_min``.
+    One Adam step per batch; full-grid cost is recorded per epoch.
 """
 
 from __future__ import annotations
@@ -570,7 +571,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     ripple_weight = float(cfg.get("ripple_weight", 0.0))
 
     # Mini-batch: keep full-grid Adam by default; enable via mini_batch=true
-    # or a nested object {"batch_size", "sample_stride", "batch_gap", ...}.
+    # or a nested object {"batch_size", "n_batches", ...}.
     mb_raw = cfg.get("mini_batch", False)
     if isinstance(mb_raw, dict):
         mini_batch = True
@@ -579,18 +580,9 @@ def run(stack_path: str, cfg_path: str) -> int:
         mini_batch = bool(mb_raw)
         mb_cfg = cfg
     batch_size = int(mb_cfg.get("batch_size", cfg.get("batch_size", 8)))
-    sample_stride = int(
-        mb_cfg.get(
-            "sample_stride",
-            cfg.get("sample_stride", cfg.get("sample_interval", 1)),
-        )
-    )
-    batch_gap = int(
-        mb_cfg.get(
-            "batch_gap",
-            cfg.get("batch_gap", cfg.get("batch_interval", 0)),
-        )
-    )
+    n_batches = mb_cfg.get("n_batches", cfg.get("n_batches"))
+    if n_batches is not None:
+        n_batches = int(n_batches)
     n_epochs = mb_cfg.get("n_epochs", cfg.get("n_epochs"))
     if n_epochs is not None:
         n_epochs = int(n_epochs)
@@ -622,8 +614,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         adam_max_step=_NM * float(cfg.get("adam_max_step_nm", 10.0)),
         mini_batch=mini_batch and method == "adam",
         batch_size=batch_size,
-        sample_stride=sample_stride,
-        batch_gap=batch_gap,
+        n_batches=n_batches,
         n_epochs=n_epochs,
         shuffle_seed=shuffle_seed,
     )
@@ -635,8 +626,8 @@ def run(stack_path: str, cfg_path: str) -> int:
     if opt.mini_batch:
         print(
             f"  mini-batch: batch_size={opt.batch_size}  "
-            f"sample_stride={opt.sample_stride}  batch_gap={opt.batch_gap}  "
-            f"n_epochs={opt.n_epochs}  seed={opt.shuffle_seed}"
+            f"n_batches={opt.n_batches}  n_epochs={opt.n_epochs}  "
+            f"seed={opt.shuffle_seed}"
         )
     else:
         print(f"  training: full wavelength grid  max_iter={opt.max_iter}")

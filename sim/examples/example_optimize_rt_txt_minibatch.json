@@ -22,8 +22,7 @@
   "output_dir": "../out/optimize_rt_txt_minibatch_smoke",
   "mini_batch": {
     "batch_size": 6,
-    "sample_stride": 1,
-    "batch_gap": 2,
+    "n_batches": 4,
     "n_epochs": 3,
     "shuffle_seed": 0
   }

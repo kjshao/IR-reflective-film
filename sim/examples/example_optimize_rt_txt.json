@@ -40,8 +40,7 @@
   "_mini_batch_example": {
     "comment": "Set mini_batch to this object (or true + top-level keys) to enable wavelength mini-batches.",
     "batch_size": 8,
-    "sample_stride": 1,
-    "batch_gap": 2,
+    "n_batches": 10,
     "n_epochs": 40,
     "shuffle_seed": 0
   }

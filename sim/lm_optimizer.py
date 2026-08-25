@@ -63,44 +63,51 @@ def wavelength_grid(bands: Sequence[BandSpec], step: float) -> list[float]:
     return sorted(pts)
 
 
-def build_epoch_batches(
-    n: int,
+def build_wrapped_wavelength_batch(
+    wl_lo: float,
+    wl_hi: float,
     batch_size: int,
-    sample_stride: int = 1,
-    batch_gap: int = 0,
-    *,
-    start_offset: int = 0,
-) -> list[list[int]]:
-    """Build all mini-batches of wavelength indices for one epoch.
+    start: float,
+) -> list[float]:
+    """Uniform wavelengths from ``start``, wrapping at ``wl_hi`` back to ``wl_lo``.
 
-    Uniform sampling: from ``start_offset``, each batch takes ``batch_size``
-    indices spaced by ``sample_stride``. The next batch starts
-    ``batch_size * sample_stride + batch_gap`` after the previous start
-    (``batch_gap`` is the extra gap between batches).
-
-    Empty trailing batches are dropped. Indices stay in ``[0, n)``.
+    Spacing is ``(wl_hi - wl_lo) / batch_size`` so the ``batch_size`` points
+    cover the study interval evenly. ``start`` may be any float; it is first
+    mapped into ``[wl_lo, wl_hi)`` before stepping.
     """
-    if n <= 0:
-        return []
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
-    if sample_stride < 1:
-        raise ValueError(f"sample_stride must be >= 1, got {sample_stride}")
-    if batch_gap < 0:
-        raise ValueError(f"batch_gap must be >= 0, got {batch_gap}")
-    if start_offset < 0:
-        raise ValueError(f"start_offset must be >= 0, got {start_offset}")
+    span = wl_hi - wl_lo
+    if span <= 0.0:
+        raise ValueError(f"need wl_hi > wl_lo, got [{wl_lo}, {wl_hi}]")
+    # Fold start into [wl_lo, wl_hi).
+    s0 = wl_lo + ((start - wl_lo) % span)
+    delta = span / batch_size
+    return [wl_lo + ((s0 - wl_lo + k * delta) % span) for k in range(batch_size)]
 
-    batches: list[list[int]] = []
-    i = start_offset
-    span = batch_size * sample_stride
-    while i < n:
-        batch = [i + k * sample_stride for k in range(batch_size) if i + k * sample_stride < n]
-        if not batch:
-            break
-        batches.append(batch)
-        i += span + batch_gap
-    return batches
+
+def build_epoch_wavelength_batches(
+    wl_lo: float,
+    wl_hi: float,
+    batch_size: int,
+    n_batches: int,
+    rng: random.Random,
+) -> list[tuple[float, list[float]]]:
+    """Build ``n_batches`` wrapped uniform wavelength batches for one epoch.
+
+    Each batch draws an independent float start uniformly in ``[wl_lo, wl_hi)``.
+    Returns a list of ``(start, wavelengths)``.
+    """
+    if n_batches < 1:
+        raise ValueError(f"n_batches must be >= 1, got {n_batches}")
+    span = wl_hi - wl_lo
+    if span <= 0.0:
+        raise ValueError(f"need wl_hi > wl_lo, got [{wl_lo}, {wl_hi}]")
+    out: list[tuple[float, list[float]]] = []
+    for _ in range(n_batches):
+        start = wl_lo + rng.random() * span
+        out.append((start, build_wrapped_wavelength_batch(wl_lo, wl_hi, batch_size, start)))
+    return out
 
 
 # Per-sample pull toward total reflection (R → 1, T → 0).
@@ -260,8 +267,7 @@ class LMThicknessOptimizer:
         # Mini-batch Adam (wavelength subsets). Off by default → full-grid Adam.
         mini_batch: bool = False,
         batch_size: int = 8,
-        sample_stride: int = 1,
-        batch_gap: int = 0,
+        n_batches: int | None = None,
         n_epochs: int | None = None,
         shuffle_seed: int | None = None,
     ):
@@ -288,8 +294,12 @@ class LMThicknessOptimizer:
         self.adam_max_step = adam_max_step
         self.mini_batch = bool(mini_batch)
         self.batch_size = int(batch_size)
-        self.sample_stride = int(sample_stride)
-        self.batch_gap = int(batch_gap)
+        # Default: about one full pass over the discrete study grid per epoch.
+        if n_batches is None:
+            n_wl = max(1, len(self.wavelengths))
+            self.n_batches = max(1, n_wl // max(1, self.batch_size))
+        else:
+            self.n_batches = int(n_batches)
         self.n_epochs = max_iter if n_epochs is None else int(n_epochs)
         self.shuffle_seed = shuffle_seed
 
@@ -639,19 +649,26 @@ class LMThicknessOptimizer:
         free_indices: Sequence[int] | None = None,
         verbose: bool = True,
     ) -> OptimResult:
-        """Adam with per-epoch uniform wavelength mini-batches.
+        """Adam with per-epoch wrapped uniform wavelength mini-batches.
 
         Each epoch:
-          1. Random start offset → build all batches (batch_size, sample_stride,
-             batch_gap).
-          2. Shuffle batch order and traverse every batch once (one Adam step
-             each on that wavelength subset).
-          3. Record full-grid cost for history / best tracking.
+          1. Draw ``n_batches`` independent float starts in ``[wl_min, wl_max)``.
+          2. Each batch takes ``batch_size`` points spaced by
+             ``(wl_max-wl_min)/batch_size``, wrapping at ``wl_max`` back to
+             ``wl_min``.
+          3. One Adam step per batch; then record full-grid cost for history /
+             best tracking.
         """
         full_wls = list(self.wavelengths)
         n_wl = len(full_wls)
         if n_wl == 0:
             raise ValueError("mini-batch Adam needs a non-empty wavelength grid")
+        wl_lo = full_wls[0]
+        wl_hi = full_wls[-1]
+        if wl_hi <= wl_lo:
+            raise ValueError(
+                f"mini-batch needs wl_max > wl_min, got [{wl_lo}, {wl_hi}]"
+            )
 
         materials = [m for m, _ in layers]
         x = self._project(materials, [d for _, d in layers])
@@ -669,45 +686,37 @@ class LMThicknessOptimizer:
         stale = 0
         rng = random.Random(self.shuffle_seed)
         n_epochs = max(1, self.n_epochs)
-        # Phase span for random epoch offsets (covers different uniform grids).
-        phase_mod = max(1, self.batch_size * self.sample_stride + self.batch_gap)
+        n_batches = max(1, self.n_batches)
+        batch_size = max(1, self.batch_size)
         t_step = 0
+        nm = 1e9
 
         if verbose:
             print(
                 f"    Adam mini-batch start: full_cost={full_cost:.6e}  "
-                f"n_wl={n_wl}  batch_size={self.batch_size}  "
-                f"sample_stride={self.sample_stride}  batch_gap={self.batch_gap}  "
-                f"n_epochs={n_epochs}  lr={lr*1e9:.2f} nm",
+                f"n_wl={n_wl}  wl=[{wl_lo*nm:.2f}, {wl_hi*nm:.2f}] nm  "
+                f"batch_size={batch_size}  n_batches={n_batches}  "
+                f"n_epochs={n_epochs}  lr={lr*nm:.2f} nm",
                 flush=True,
             )
 
         for epoch in range(1, n_epochs + 1):
-            offset = rng.randrange(phase_mod) if phase_mod > 1 else 0
-            batches = build_epoch_batches(
-                n_wl,
-                self.batch_size,
-                self.sample_stride,
-                self.batch_gap,
-                start_offset=offset,
+            batches = build_epoch_wavelength_batches(
+                wl_lo, wl_hi, batch_size, n_batches, rng
             )
-            if not batches:
-                # Degenerate config: fall back to full grid for this epoch.
-                batches = [list(range(n_wl))]
             order = list(range(len(batches)))
             rng.shuffle(order)
 
-            if verbose and (epoch == 1 or epoch % 5 == 0 or epoch == n_epochs):
+            if verbose:
                 print(
-                    f"    epoch {epoch:3d}: offset={offset}  "
-                    f"n_batches={len(batches)}  "
-                    f"(shuffle → first batch size {len(batches[order[0]])})",
+                    f"    epoch {epoch:3d}/{n_epochs}: "
+                    f"n_batches={n_batches}  batch_size={batch_size}",
                     flush=True,
                 )
 
-            for bi in order:
-                idx = batches[bi]
-                batch_wls = [full_wls[i] for i in idx]
+            epoch_batch_cost_sum = 0.0
+            for bi_pos, bi in enumerate(order, 1):
+                start, batch_wls = batches[bi]
                 self._set_wavelengths(batch_wls)
                 batch_layers = list(zip(materials, x))
                 batch_r = self.residuals(batch_layers)
@@ -716,6 +725,17 @@ class LMThicknessOptimizer:
                 x, _bc, _br, step_norm = self._adam_step(
                     materials, x, free, m, v, lr=lr, t=t_step, cost=batch_cost
                 )
+                epoch_batch_cost_sum += batch_cost
+                if verbose:
+                    wl_sorted = sorted(batch_wls)
+                    print(
+                        f"      batch {bi_pos:3d}/{n_batches}: "
+                        f"start={start*nm:.4f} nm  "
+                        f"wl=[{wl_sorted[0]*nm:.2f}, {wl_sorted[-1]*nm:.2f}] nm  "
+                        f"cost={batch_cost:.6e}  "
+                        f"|Δ|={step_norm*nm:.4f} nm",
+                        flush=True,
+                    )
                 if step_norm < 1e-15:
                     break
 
@@ -734,11 +754,13 @@ class LMThicknessOptimizer:
                     lr = max(lr * 0.5, 0.05e-9)
                     stale = 0
 
-            if verbose and (epoch == 1 or epoch % 5 == 0 or epoch == n_epochs):
+            if verbose:
+                mean_batch = epoch_batch_cost_sum / max(1, n_batches)
                 print(
-                    f"    Adam epoch {epoch:3d}: full_cost={full_cost:.6e}  "
+                    f"    epoch {epoch:3d} done: full_cost={full_cost:.6e}  "
+                    f"mean_batch_cost={mean_batch:.6e}  "
                     f"best={best_cost:.6e}@epoch{best_iter}  "
-                    f"lr={lr*1e9:.2f} nm  Σd={sum(best_x)*1e9:.1f} nm",
+                    f"lr={lr*nm:.2f} nm  Σd={sum(best_x)*nm:.1f} nm",
                     flush=True,
                 )
             if best_cost < self.tol:
