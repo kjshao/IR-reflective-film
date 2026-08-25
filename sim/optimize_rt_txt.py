@@ -4,8 +4,12 @@ Initial stack format matches ``plot_rt_txt.py``. Optimises **coating** layer
 thicknesses only; the first row (incident medium) and last row (substrate)
 are never free variables — their thicknesses stay exactly as in the input.
 
-Objective: build a piecewise R target (minimize bands → 0, maximize → 1)
-over the union of the N bands, then minimise mean(|R−target|^p) plus optional
+Objective: build a piecewise R target (minimize bands → 0, maximize → 1),
+then minimise the **band-normalized** fit
+
+    L = Σ_b w_b · mean_{λ∈b} |R − t_b|^p  /  Σ_b w_b
+
+(independent of sample count and absolute weight scale), plus optional
 peak-suppression terms (``smooth_weight``, ``ripple_weight``; raise
 ``error_power`` above 2 to overweight sharp outliers).
 
@@ -178,32 +182,6 @@ def build_r_target_curve(
     return targets, weights
 
 
-def reflectance_mse(
-    R: Sequence[float],
-    targets: Sequence[float | None],
-    weights: Sequence[float],
-    *,
-    error_power: float = 2.0,
-) -> float:
-    """Weighted mean of |R - target|^p (p=2 → MSE)."""
-    p = float(error_power)
-    if p <= 0:
-        raise ValueError(f"error_power must be > 0, got {error_power}")
-    num = 0.0
-    den = 0.0
-    for r, t, w in zip(R, targets, weights):
-        if t is None:
-            continue
-        ww = max(w, 0.0)
-        if ww <= 0.0:
-            continue
-        num += ww * abs(r - t) ** p
-        den += ww
-    if den <= 0.0:
-        return 0.0
-    return num / den
-
-
 def _band_sample_indices(
     bands: Sequence[RObjectiveBand],
     wavelengths: Sequence[float],
@@ -220,6 +198,52 @@ def _band_sample_indices(
     return out
 
 
+def _active_band_weight_sum(
+    bands: Sequence[RObjectiveBand],
+    band_indices: Sequence[Sequence[int]],
+) -> float:
+    """Sum of weights over bands that have at least one sample."""
+    return sum(
+        max(float(b.weight), 0.0)
+        for b, idx in zip(bands, band_indices)
+        if idx and b.weight > 0
+    )
+
+
+def reflectance_mse(
+    R: Sequence[float],
+    bands: Sequence[RObjectiveBand],
+    wavelengths: Sequence[float],
+    *,
+    error_power: float = 2.0,
+) -> float:
+    """Band-normalized fit loss, independent of N and absolute weight scale.
+
+    For each band ``b`` compute the in-band mean ``mean_b |R - t_b|^p``, then
+
+        L = Σ_b w_b · mean_b / Σ_b w_b
+
+    So widening a band (more sample points) or scaling all ``w_b`` by a
+    constant leaves ``L`` unchanged; only *relative* band weights matter.
+    """
+    p = float(error_power)
+    if p <= 0:
+        raise ValueError(f"error_power must be > 0, got {error_power}")
+    band_indices = _band_sample_indices(bands, wavelengths)
+    w_sum = _active_band_weight_sum(bands, band_indices)
+    if w_sum <= 0.0:
+        return 0.0
+    loss = 0.0
+    for b, idx in zip(bands, band_indices):
+        w = max(float(b.weight), 0.0)
+        if not idx or w <= 0.0:
+            continue
+        t = 1.0 if b.maximize else 0.0
+        mean_err = sum(abs(R[i] - t) ** p for i in idx) / len(idx)
+        loss += (w / w_sum) * mean_err
+    return loss
+
+
 def peak_suppression_penalty(
     R: Sequence[float],
     bands: Sequence[RObjectiveBand],
@@ -228,29 +252,36 @@ def peak_suppression_penalty(
     smooth_weight: float,
     ripple_weight: float,
 ) -> float:
-    """Smoothness + in-band ripple terms that discourage sharp peaks."""
-    pen = 0.0
+    """Band-normalized smoothness + ripple; same weight/N independence as fit."""
     band_indices = _band_sample_indices(bands, wavelengths)
+    w_sum = _active_band_weight_sum(bands, band_indices)
+    if w_sum <= 0.0:
+        return 0.0
 
+    pen = 0.0
     if smooth_weight > 0:
-        diffs: list[float] = []
-        for idx in band_indices:
-            for a, b in zip(idx, idx[1:]):
-                # Only consecutive samples on the global grid.
-                if b == a + 1:
-                    diffs.append(R[b] - R[a])
-        if diffs:
-            pen += smooth_weight * (sum(d * d for d in diffs) / len(diffs))
+        for b, idx in zip(bands, band_indices):
+            w = max(float(b.weight), 0.0)
+            if not idx or w <= 0.0:
+                continue
+            diffs = [
+                R[j] - R[i]
+                for i, j in zip(idx, idx[1:])
+                if j == i + 1
+            ]
+            if not diffs:
+                continue
+            mean_d2 = sum(d * d for d in diffs) / len(diffs)
+            pen += smooth_weight * (w / w_sum) * mean_d2
 
     if ripple_weight > 0:
-        ripples: list[float] = []
-        for idx in band_indices:
-            if len(idx) < 2:
+        for b, idx in zip(bands, band_indices):
+            w = max(float(b.weight), 0.0)
+            if len(idx) < 2 or w <= 0.0:
                 continue
             rs = [R[i] for i in idx]
-            ripples.append(max(rs) - min(rs))
-        if ripples:
-            pen += ripple_weight * (sum(x * x for x in ripples) / len(ripples))
+            amp = max(rs) - min(rs)
+            pen += ripple_weight * (w / w_sum) * (amp * amp)
 
     return pen
 
@@ -267,65 +298,69 @@ def build_maxmin_r_residuals(
     smooth_weight: float = 0.0,
     ripple_weight: float = 0.0,
 ) -> list[float]:
-    """Residuals for target fit + optional peak-suppression regularisers.
+    """Residuals for band-normalized fit + peak-suppression regularisers.
 
-    Base term: weighted mean of |R - R_target|^p with
-    minimize→0, maximize→1.  Residuals are scaled so
-    ``0.5 * sum(r**2)`` equals that mean (plus regularisers).
+    Fit term (independent of sample count and absolute weight scale)::
 
-    Peak suppression (recommended against sharp spikes)::
+        L_fit = Σ_b w_b · mean_{λ∈b} |R − t_b|^p  /  Σ_b w_b
+
+    with ``t_b = 1`` (maximize) or ``0`` (minimize). Residuals are scaled so
+    ``0.5 * sum(r**2) == L_fit + L_smooth + L_ripple (+ thickness)``.
+
+    Peak suppression::
 
       - ``error_power`` > 2 (e.g. 4): overweight large |R−target| outliers
-      - ``smooth_weight``: penalise (ΔR)² along λ inside each band
-      - ``ripple_weight``: penalise in-band (R_max − R_min)²
+      - ``smooth_weight``: band-normalized mean (ΔR)²
+      - ``ripple_weight``: band-normalized (R_max − R_min)²
     """
     p = float(error_power)
     if p <= 0:
         raise ValueError(f"error_power must be > 0, got {error_power}")
 
-    targets, weights = build_r_target_curve(bands, wavelengths)
-    samples: list[tuple[float, float, float]] = []
-    for r, t, w in zip(R, targets, weights):
-        if t is None or w <= 0.0:
-            continue
-        samples.append((r, t, w))
-    if not samples:
+    band_indices = _band_sample_indices(bands, wavelengths)
+    w_sum = _active_band_weight_sum(bands, band_indices)
+    if w_sum <= 0.0:
         return [0.0]
 
-    w_sum = sum(w for _, _, w in samples)
-    # r_i = sqrt(2 w_i/W) * sign(e) * |e|^(p/2)
-    # ⇒ 0.5 Σ r² = Σ w |e|^p / W
     res: list[float] = []
-    for r, t, w in samples:
-        e = r - t
-        mag = abs(e) ** (p / 2.0)
-        signed = mag if e >= 0.0 else -mag
-        res.append(math.sqrt(2.0 * w / w_sum) * signed)
-
-    band_indices = _band_sample_indices(bands, wavelengths)
+    for b, idx in zip(bands, band_indices):
+        w = max(float(b.weight), 0.0)
+        if not idx or w <= 0.0:
+            continue
+        t = 1.0 if b.maximize else 0.0
+        n = len(idx)
+        # 0.5 Σ_i r_i² = (w/W) · mean |e|^p
+        scale = math.sqrt(2.0 * w / (w_sum * n))
+        for i in idx:
+            e = R[i] - t
+            mag = abs(e) ** (p / 2.0)
+            res.append(scale * (mag if e >= 0.0 else -mag))
 
     if smooth_weight > 0:
-        pairs: list[tuple[int, int]] = []
-        for idx in band_indices:
-            for a, b in zip(idx, idx[1:]):
-                if b == a + 1:
-                    pairs.append((a, b))
-        if pairs:
-            scale = math.sqrt(2.0 * smooth_weight / len(pairs))
-            for a, b in pairs:
-                res.append(scale * (R[b] - R[a]))
+        for b, idx in zip(bands, band_indices):
+            w = max(float(b.weight), 0.0)
+            if not idx or w <= 0.0:
+                continue
+            pairs = [
+                (i, j)
+                for i, j in zip(idx, idx[1:])
+                if j == i + 1
+            ]
+            if not pairs:
+                continue
+            scale = math.sqrt(2.0 * smooth_weight * w / (w_sum * len(pairs)))
+            for i, j in pairs:
+                res.append(scale * (R[j] - R[i]))
 
     if ripple_weight > 0:
-        ripples: list[float] = []
-        for idx in band_indices:
-            if len(idx) < 2:
+        for b, idx in zip(bands, band_indices):
+            w = max(float(b.weight), 0.0)
+            if len(idx) < 2 or w <= 0.0:
                 continue
             rs = [R[i] for i in idx]
-            ripples.append(max(rs) - min(rs))
-        if ripples:
-            scale = math.sqrt(2.0 * ripple_weight / len(ripples))
-            for amp in ripples:
-                res.append(scale * amp)
+            amp = max(rs) - min(rs)
+            scale = math.sqrt(2.0 * ripple_weight * w / w_sum)
+            res.append(scale * amp)
 
     if thickness_weight > 0 and layers:
         total = sum(d for _, d in layers)
@@ -373,12 +408,12 @@ class MaxMinROptimizer(LMThicknessOptimizer):
         )
 
     def cost(self, layers: Sequence[tuple[str, float]]) -> float:
-        """Target fit + peak-suppression terms (matches ``0.5*||r||^2``)."""
+        """Band-normalized fit + peak terms (matches ``0.5*||r||^2``)."""
         R, _T = self._rt(layers)
         loss = reflectance_mse(
             R,
-            self._targets,
-            self._target_weights,
+            self.rbands,
+            self.wavelengths,
             error_power=self.error_power,
         )
         loss += peak_suppression_penalty(
@@ -553,8 +588,9 @@ def run(stack_path: str, cfg_path: str) -> int:
         f"(incident/substrate thicknesses not optimised)"
     )
     print(
-        f"  objective: mean(|R−target|^{error_power:g}) "
-        f"+ smooth={smooth_weight:g} + ripple={ripple_weight:g}"
+        f"  objective: band-normalized mean(|R−target|^{error_power:g}) "
+        f"+ smooth={smooth_weight:g} + ripple={ripple_weight:g} "
+        f"(independent of N and absolute weights)"
     )
     print(f"  n_bands: {len(rbands)}")
     for b in rbands:
