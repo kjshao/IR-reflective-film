@@ -1,0 +1,38 @@
+{
+  "comment": "Minimal example: explicit layer list + band ranges → R/T spectrum plot.",
+  "incident_angle_deg": 0,
+  "polarization": "unpolarized",
+  "incident_medium": "air",
+  "substrate": "glass",
+  "substrate_thickness_m": 0.0007,
+  "exit_medium": "air",
+  "substrate_model": "semi_infinite",
+  "rt_engine": "tmm",
+  "layers": [
+    {"material": "tio2", "thickness_nm": 55},
+    {"material": "sio2", "thickness_nm": 85},
+    {"material": "tio2", "thickness_nm": 55},
+    {"material": "sio2", "thickness_nm": 85},
+    {"material": "tio2", "thickness_nm": 55},
+    {"material": "sio2", "thickness_nm": 85},
+    {"material": "tio2", "thickness_nm": 55},
+    {"material": "sio2", "thickness_nm": 85}
+  ],
+  "bands": [
+    {
+      "wavelength_nm": [420, 700],
+      "R_min": 0.8,
+      "T_max": 0.2,
+      "weight": 1.0
+    },
+    {
+      "wavelength_nm": [780, 1800],
+      "R_min": 0.9,
+      "T_max": 0.1,
+      "weight": 1.0
+    }
+  ],
+  "plot_wavelength_nm": [400, 1800],
+  "plot_step_nm": 5,
+  "output_dir": "../out/plot_rt_example"
+}
