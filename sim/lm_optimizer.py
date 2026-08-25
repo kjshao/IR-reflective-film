@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -60,6 +61,46 @@ def wavelength_grid(bands: Sequence[BandSpec], step: float) -> list[float]:
         for i in range(n + 1):
             pts.add(b.wl_lo + i * (b.wl_hi - b.wl_lo) / n)
     return sorted(pts)
+
+
+def build_epoch_batches(
+    n: int,
+    batch_size: int,
+    sample_stride: int = 1,
+    batch_gap: int = 0,
+    *,
+    start_offset: int = 0,
+) -> list[list[int]]:
+    """Build all mini-batches of wavelength indices for one epoch.
+
+    Uniform sampling: from ``start_offset``, each batch takes ``batch_size``
+    indices spaced by ``sample_stride``. The next batch starts
+    ``batch_size * sample_stride + batch_gap`` after the previous start
+    (``batch_gap`` is the extra gap between batches).
+
+    Empty trailing batches are dropped. Indices stay in ``[0, n)``.
+    """
+    if n <= 0:
+        return []
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    if sample_stride < 1:
+        raise ValueError(f"sample_stride must be >= 1, got {sample_stride}")
+    if batch_gap < 0:
+        raise ValueError(f"batch_gap must be >= 0, got {batch_gap}")
+    if start_offset < 0:
+        raise ValueError(f"start_offset must be >= 0, got {start_offset}")
+
+    batches: list[list[int]] = []
+    i = start_offset
+    span = batch_size * sample_stride
+    while i < n:
+        batch = [i + k * sample_stride for k in range(batch_size) if i + k * sample_stride < n]
+        if not batch:
+            break
+        batches.append(batch)
+        i += span + batch_gap
+    return batches
 
 
 # Per-sample pull toward total reflection (R → 1, T → 0).
@@ -216,6 +257,13 @@ class LMThicknessOptimizer:
         adam_beta2: float = 0.999,
         adam_eps: float = 1e-8,
         adam_max_step: float = 10e-9,
+        # Mini-batch Adam (wavelength subsets). Off by default → full-grid Adam.
+        mini_batch: bool = False,
+        batch_size: int = 8,
+        sample_stride: int = 1,
+        batch_gap: int = 0,
+        n_epochs: int | None = None,
+        shuffle_seed: int | None = None,
     ):
         self.calc = calculator
         self.bands = list(bands)
@@ -238,6 +286,12 @@ class LMThicknessOptimizer:
         self.adam_beta2 = adam_beta2
         self.adam_eps = adam_eps
         self.adam_max_step = adam_max_step
+        self.mini_batch = bool(mini_batch)
+        self.batch_size = int(batch_size)
+        self.sample_stride = int(sample_stride)
+        self.batch_gap = int(batch_gap)
+        self.n_epochs = max_iter if n_epochs is None else int(n_epochs)
+        self.shuffle_seed = shuffle_seed
 
     def _rt(self, layers: Sequence[tuple[str, float]]):
         return self.calc.spectrum(
@@ -447,6 +501,10 @@ class LMThicknessOptimizer:
         verbose: bool = True,
     ) -> OptimResult:
         if self.method == "adam":
+            if self.mini_batch:
+                return self._optimize_adam_minibatch(
+                    layers, free_indices=free_indices, verbose=verbose
+                )
             return self._optimize_adam(
                 layers, free_indices=free_indices, verbose=verbose
             )
@@ -455,6 +513,51 @@ class LMThicknessOptimizer:
                 f"unknown optimizer method {self.method!r}; use 'lm' or 'adam'"
             )
         return self._optimize_lm(layers, free_indices=free_indices, verbose=verbose)
+
+    def _set_wavelengths(self, wavelengths: Sequence[float]) -> None:
+        """Swap active wavelength grid (used by mini-batch Adam)."""
+        self.wavelengths = list(wavelengths)
+
+    def _adam_step(
+        self,
+        materials: Sequence[str],
+        x: list[float],
+        free: Sequence[int],
+        m: list[float],
+        v: list[float],
+        *,
+        lr: float,
+        t: int,
+        cost: float,
+    ) -> tuple[list[float], float, list[float], float]:
+        """One projected Adam update; returns (x, cost, residuals, step_norm)."""
+        b1, b2, eps = self.adam_beta1, self.adam_beta2, self.adam_eps
+        max_step = self.adam_max_step
+        g, free_cols = self._cost_gradient(materials, x, cost, free)
+        if not free_cols:
+            r = self.residuals(list(zip(materials, x)))
+            return x, cost, r, 0.0
+        b1t = 1.0 - b1**t
+        b2t = 1.0 - b2**t
+        delta = [0.0] * len(x)
+        for j in free_cols:
+            gj = g[j]
+            m[j] = b1 * m[j] + (1.0 - b1) * gj
+            v[j] = b2 * v[j] + (1.0 - b2) * gj * gj
+            mhat = m[j] / b1t
+            vhat = v[j] / b2t
+            step = lr * mhat / (math.sqrt(vhat) + eps)
+            if step > max_step:
+                step = max_step
+            elif step < -max_step:
+                step = -max_step
+            delta[j] = -step
+
+        x = self._project(materials, [x[i] + delta[i] for i in range(len(x))])
+        r = self.residuals(list(zip(materials, x)))
+        cost = 0.5 * sum(v_i * v_i for v_i in r)
+        step_norm = math.sqrt(sum(d * d for d in delta))
+        return x, cost, r, step_norm
 
     def _optimize_adam(
         self,
@@ -475,8 +578,6 @@ class LMThicknessOptimizer:
         m = [0.0] * len(x)
         v = [0.0] * len(x)
         lr = self.adam_lr
-        b1, b2, eps = self.adam_beta1, self.adam_beta2, self.adam_eps
-        max_step = self.adam_max_step
         stale = 0
 
         if verbose:
@@ -487,30 +588,10 @@ class LMThicknessOptimizer:
             )
 
         for it in range(1, self.max_iter + 1):
-            g, free_cols = self._cost_gradient(materials, x, cost, free)
-            if not free_cols:
-                break
-            b1t = 1.0 - b1**it
-            b2t = 1.0 - b2**it
-            delta = [0.0] * len(x)
-            for j in free_cols:
-                gj = g[j]
-                m[j] = b1 * m[j] + (1.0 - b1) * gj
-                v[j] = b2 * v[j] + (1.0 - b2) * gj * gj
-                mhat = m[j] / b1t
-                vhat = v[j] / b2t
-                step = lr * mhat / (math.sqrt(vhat) + eps)
-                if step > max_step:
-                    step = max_step
-                elif step < -max_step:
-                    step = -max_step
-                delta[j] = -step
-
-            x = self._project(materials, [x[i] + delta[i] for i in range(len(x))])
-            r = self.residuals(list(zip(materials, x)))
-            cost = 0.5 * sum(v_i * v_i for v_i in r)
+            x, cost, r, step_norm = self._adam_step(
+                materials, x, free, m, v, lr=lr, t=it, cost=cost
+            )
             history.append(cost)
-            step_norm = math.sqrt(sum(d * d for d in delta))
 
             if cost < best_cost - 1e-12:
                 best_x, best_cost, best_r, best_iter = list(x), cost, r, it
@@ -547,6 +628,140 @@ class LMThicknessOptimizer:
             self.max_iter,
             best_cost < history[0],
             "max_iter",
+            history,
+            best_iter=best_iter,
+        )
+
+    def _optimize_adam_minibatch(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        """Adam with per-epoch uniform wavelength mini-batches.
+
+        Each epoch:
+          1. Random start offset → build all batches (batch_size, sample_stride,
+             batch_gap).
+          2. Shuffle batch order and traverse every batch once (one Adam step
+             each on that wavelength subset).
+          3. Record full-grid cost for history / best tracking.
+        """
+        full_wls = list(self.wavelengths)
+        n_wl = len(full_wls)
+        if n_wl == 0:
+            raise ValueError("mini-batch Adam needs a non-empty wavelength grid")
+
+        materials = [m for m, _ in layers]
+        x = self._project(materials, [d for _, d in layers])
+        free = list(range(len(x))) if free_indices is None else list(free_indices)
+
+        self._set_wavelengths(full_wls)
+        r = self.residuals(list(zip(materials, x)))
+        full_cost = 0.5 * sum(v * v for v in r)
+        history = [full_cost]
+        best_x, best_cost, best_r, best_iter = list(x), full_cost, r, 0
+
+        m = [0.0] * len(x)
+        v = [0.0] * len(x)
+        lr = self.adam_lr
+        stale = 0
+        rng = random.Random(self.shuffle_seed)
+        n_epochs = max(1, self.n_epochs)
+        # Phase span for random epoch offsets (covers different uniform grids).
+        phase_mod = max(1, self.batch_size * self.sample_stride + self.batch_gap)
+        t_step = 0
+
+        if verbose:
+            print(
+                f"    Adam mini-batch start: full_cost={full_cost:.6e}  "
+                f"n_wl={n_wl}  batch_size={self.batch_size}  "
+                f"sample_stride={self.sample_stride}  batch_gap={self.batch_gap}  "
+                f"n_epochs={n_epochs}  lr={lr*1e9:.2f} nm",
+                flush=True,
+            )
+
+        for epoch in range(1, n_epochs + 1):
+            offset = rng.randrange(phase_mod) if phase_mod > 1 else 0
+            batches = build_epoch_batches(
+                n_wl,
+                self.batch_size,
+                self.sample_stride,
+                self.batch_gap,
+                start_offset=offset,
+            )
+            if not batches:
+                # Degenerate config: fall back to full grid for this epoch.
+                batches = [list(range(n_wl))]
+            order = list(range(len(batches)))
+            rng.shuffle(order)
+
+            if verbose and (epoch == 1 or epoch % 5 == 0 or epoch == n_epochs):
+                print(
+                    f"    epoch {epoch:3d}: offset={offset}  "
+                    f"n_batches={len(batches)}  "
+                    f"(shuffle → first batch size {len(batches[order[0]])})",
+                    flush=True,
+                )
+
+            for bi in order:
+                idx = batches[bi]
+                batch_wls = [full_wls[i] for i in idx]
+                self._set_wavelengths(batch_wls)
+                batch_layers = list(zip(materials, x))
+                batch_r = self.residuals(batch_layers)
+                batch_cost = 0.5 * sum(v_i * v_i for v_i in batch_r)
+                t_step += 1
+                x, _bc, _br, step_norm = self._adam_step(
+                    materials, x, free, m, v, lr=lr, t=t_step, cost=batch_cost
+                )
+                if step_norm < 1e-15:
+                    break
+
+            # Full-grid evaluation for comparable history / best selection.
+            self._set_wavelengths(full_wls)
+            r = self.residuals(list(zip(materials, x)))
+            full_cost = 0.5 * sum(v_i * v_i for v_i in r)
+            history.append(full_cost)
+
+            if full_cost < best_cost - 1e-12:
+                best_x, best_cost, best_r, best_iter = list(x), full_cost, r, epoch
+                stale = 0
+            else:
+                stale += 1
+                if stale >= 8:
+                    lr = max(lr * 0.5, 0.05e-9)
+                    stale = 0
+
+            if verbose and (epoch == 1 or epoch % 5 == 0 or epoch == n_epochs):
+                print(
+                    f"    Adam epoch {epoch:3d}: full_cost={full_cost:.6e}  "
+                    f"best={best_cost:.6e}@epoch{best_iter}  "
+                    f"lr={lr*1e9:.2f} nm  Σd={sum(best_x)*1e9:.1f} nm",
+                    flush=True,
+                )
+            if best_cost < self.tol:
+                self._set_wavelengths(full_wls)
+                return OptimResult(
+                    list(zip(materials, best_x)),
+                    best_cost,
+                    best_r,
+                    epoch,
+                    True,
+                    "converged",
+                    history,
+                    best_iter=best_iter,
+                )
+
+        self._set_wavelengths(full_wls)
+        return OptimResult(
+            list(zip(materials, best_x)),
+            best_cost,
+            best_r,
+            n_epochs,
+            best_cost < history[0],
+            "max_epochs",
             history,
             best_iter=best_iter,
         )

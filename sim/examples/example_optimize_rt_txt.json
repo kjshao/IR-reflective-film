@@ -35,5 +35,14 @@
   "polarization": "unpolarized",
   "plot_wavelength_nm": [400, 1800],
   "plot_step_nm": 5,
-  "output_dir": "../out/optimize_rt_txt_example"
+  "output_dir": "../out/optimize_rt_txt_example",
+  "mini_batch": false,
+  "_mini_batch_example": {
+    "comment": "Set mini_batch to this object (or true + top-level keys) to enable wavelength mini-batches.",
+    "batch_size": 8,
+    "sample_stride": 1,
+    "batch_gap": 2,
+    "n_epochs": 40,
+    "shuffle_seed": 0
+  }
 }

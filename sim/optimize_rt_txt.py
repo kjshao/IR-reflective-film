@@ -18,6 +18,15 @@ Usage::
     python3 sim/optimize_rt_txt.py \\
         sim/examples/example_stack.txt \\
         sim/examples/example_optimize_rt_txt.json
+
+Training modes (``method=adam``):
+
+  - **full grid** (default): each iteration uses the full wavelength grid.
+  - **mini-batch**: set ``mini_batch`` true or to an object with
+    ``batch_size``, ``sample_stride`` (uniform sampling interval),
+    ``batch_gap`` (extra gap between batches), optional ``n_epochs`` /
+    ``shuffle_seed``. Each epoch builds all batches, shuffles them, and
+    takes one Adam step per batch; full-grid cost is recorded per epoch.
 """
 
 from __future__ import annotations
@@ -490,6 +499,18 @@ def write_loss_history(path: str, history: list[float], best_iter: int) -> None:
             fh.write(f"{i},{loss:.12e},{flag}\n")
 
 
+def write_loss_history_epochs(
+    path: str, history: list[float], best_epoch: int
+) -> None:
+    """Same as write_loss_history but header uses epoch (mini-batch mode)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("epoch,mse,is_best\n")
+        for i, loss in enumerate(history):
+            flag = 1 if i == best_epoch else 0
+            fh.write(f"{i},{loss:.12e},{flag}\n")
+
+
 def print_band_report(
     label: str,
     layers: list[tuple[str, float]],
@@ -547,6 +568,36 @@ def run(stack_path: str, cfg_path: str) -> int:
     error_power = float(cfg.get("error_power", 2.0))
     smooth_weight = float(cfg.get("smooth_weight", 0.0))
     ripple_weight = float(cfg.get("ripple_weight", 0.0))
+
+    # Mini-batch: keep full-grid Adam by default; enable via mini_batch=true
+    # or a nested object {"batch_size", "sample_stride", "batch_gap", ...}.
+    mb_raw = cfg.get("mini_batch", False)
+    if isinstance(mb_raw, dict):
+        mini_batch = True
+        mb_cfg = mb_raw
+    else:
+        mini_batch = bool(mb_raw)
+        mb_cfg = cfg
+    batch_size = int(mb_cfg.get("batch_size", cfg.get("batch_size", 8)))
+    sample_stride = int(
+        mb_cfg.get(
+            "sample_stride",
+            cfg.get("sample_stride", cfg.get("sample_interval", 1)),
+        )
+    )
+    batch_gap = int(
+        mb_cfg.get(
+            "batch_gap",
+            cfg.get("batch_gap", cfg.get("batch_interval", 0)),
+        )
+    )
+    n_epochs = mb_cfg.get("n_epochs", cfg.get("n_epochs"))
+    if n_epochs is not None:
+        n_epochs = int(n_epochs)
+    shuffle_seed = mb_cfg.get("shuffle_seed", cfg.get("shuffle_seed"))
+    if shuffle_seed is not None:
+        shuffle_seed = int(shuffle_seed)
+
     opt = MaxMinROptimizer(
         calc,
         rbands,
@@ -569,12 +620,26 @@ def run(stack_path: str, cfg_path: str) -> int:
         adam_beta2=float(cfg.get("adam_beta2", 0.999)),
         adam_eps=float(cfg.get("adam_eps", 1e-8)),
         adam_max_step=_NM * float(cfg.get("adam_max_step_nm", 10.0)),
+        mini_batch=mini_batch and method == "adam",
+        batch_size=batch_size,
+        sample_stride=sample_stride,
+        batch_gap=batch_gap,
+        n_epochs=n_epochs,
+        shuffle_seed=shuffle_seed,
     )
 
     print("Text-stack R-target MSE thickness optimiser")
     print(f"  stack: {stack_path}")
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
+    if opt.mini_batch:
+        print(
+            f"  mini-batch: batch_size={opt.batch_size}  "
+            f"sample_stride={opt.sample_stride}  batch_gap={opt.batch_gap}  "
+            f"n_epochs={opt.n_epochs}  seed={opt.shuffle_seed}"
+        )
+    else:
+        print(f"  training: full wavelength grid  max_iter={opt.max_iter}")
     print(
         f"  fixed incident: {incident.material}  "
         f"d={incident.thickness_nm:g} nm  n={incident.n:g}  k={incident.k:g}"
@@ -628,15 +693,17 @@ def run(stack_path: str, cfg_path: str) -> int:
         polarization=pol,
     )
     print_band_report(
-        f"Best MSE (iter {best_iter})",
+        f"Best MSE ({'epoch' if opt.mini_batch else 'iter'} {best_iter})",
         layers_best,
         rbands,
         opt.wavelengths,
         opt._rt(layers_best)[0],
     )
     print(
-        f"\n  best MSE={best_cost:.6e} at iter {best_iter}  "
-        f"(ran {result.n_iter} iters, {result.message})"
+        f"\n  best MSE={best_cost:.6e} at "
+        f"{'epoch' if opt.mini_batch else 'iter'} {best_iter}  "
+        f"(ran {result.n_iter} "
+        f"{'epochs' if opt.mini_batch else 'iters'}, {result.message})"
     )
 
     os.makedirs(out_dir, exist_ok=True)
@@ -703,7 +770,10 @@ def run(stack_path: str, cfg_path: str) -> int:
             "# incident and substrate thicknesses fixed (not optimised)",
         ],
     )
-    write_loss_history(loss_path, result.history, best_iter)
+    if opt.mini_batch:
+        write_loss_history_epochs(loss_path, result.history, best_iter)
+    else:
+        write_loss_history(loss_path, result.history, best_iter)
     write_spectrum_csv(
         os.path.join(out_dir, "spectrum_best.csv"), plot_wls, R1, T1
     )
