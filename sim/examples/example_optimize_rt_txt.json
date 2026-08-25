@@ -21,7 +21,7 @@
   ],
   "wavelength_step_nm": 15,
   "max_iter": 40,
-  "thickness_weight": 0.01,
+  "thickness_weight": 0.0,
   "fd_step_nm": 0.5,
   "adam_lr_nm": 2.0,
   "adam_beta1": 0.9,

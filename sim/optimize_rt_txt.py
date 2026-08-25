@@ -4,6 +4,9 @@ Initial stack format matches ``plot_rt_txt.py``. Optimises **coating** layer
 thicknesses only; the first row (incident medium) and last row (substrate)
 are never free variables — their thicknesses stay exactly as in the input.
 
+Objective: build a piecewise R target (minimize bands → 0, maximize → 1)
+over the union of the N bands, then minimise MSE(R, R_target).
+
 Usage::
 
     python3 sim/optimize_rt_txt.py \\
@@ -153,47 +156,85 @@ class ConstantNkCalculator(RTCalculator):
         return rs, ts
 
 
+def build_r_target_curve(
+    bands: Sequence[RObjectiveBand],
+    wavelengths: Sequence[float],
+) -> tuple[list[float | None], list[float]]:
+    """Piecewise R target: maximize→1, minimize→0; None outside all bands.
+
+    If bands overlap, the last listed band wins for that wavelength.
+    """
+    targets: list[float | None] = [None] * len(wavelengths)
+    weights = [0.0] * len(wavelengths)
+    for b in bands:
+        t = 1.0 if b.maximize else 0.0
+        w = max(float(b.weight), 0.0)
+        for i, wl in enumerate(wavelengths):
+            if b.wl_lo - 1e-15 <= wl <= b.wl_hi + 1e-15:
+                targets[i] = t
+                weights[i] = w
+    return targets, weights
+
+
+def reflectance_mse(
+    R: Sequence[float],
+    targets: Sequence[float | None],
+    weights: Sequence[float],
+) -> float:
+    """Weighted MSE of R vs target curve (samples with target=None skipped)."""
+    num = 0.0
+    den = 0.0
+    for r, t, w in zip(R, targets, weights):
+        if t is None:
+            continue
+        ww = max(w, 0.0)
+        if ww <= 0.0:
+            continue
+        err = r - t
+        num += ww * err * err
+        den += ww
+    if den <= 0.0:
+        return 0.0
+    return num / den
+
+
 def build_maxmin_r_residuals(
     layers: Sequence[tuple[str, float]],
     bands: Sequence[RObjectiveBand],
     wavelengths: Sequence[float],
     R: Sequence[float],
     *,
-    thickness_weight: float = 0.02,
+    thickness_weight: float = 0.0,
     thickness_ref: float = 1000e-9,
 ) -> list[float]:
-    """Joint residuals: maximize → drive R→1; minimize → drive R→0."""
-    res: list[float] = []
-    for b in bands:
-        w = math.sqrt(max(b.weight, 0.0))
-        rs = [
-            r
-            for wl, r in zip(wavelengths, R)
-            if b.wl_lo - 1e-15 <= wl <= b.wl_hi + 1e-15
-        ]
-        if not rs:
+    """Residuals so that ``0.5 * sum(r**2)`` equals the R-target MSE.
+
+    Target curve: minimize bands → 0, maximize bands → 1. Per-sample weight
+    comes from the band ``weight``. Optional thickness penalty is added only
+    when ``thickness_weight > 0`` (then the scalar is no longer pure MSE).
+    """
+    targets, weights = build_r_target_curve(bands, wavelengths)
+    samples: list[tuple[float, float, float]] = []
+    for r, t, w in zip(R, targets, weights):
+        if t is None or w <= 0.0:
             continue
-        wn = w / math.sqrt(len(rs))
-        if b.maximize:
-            for r in rs:
-                res.append(wn * (1.0 - r))
-            res.append(1.5 * w * (1.0 - min(rs)))
-            res.append(0.5 * w * (max(rs) - min(rs)))
-        else:
-            for r in rs:
-                res.append(wn * r)
-            res.append(1.5 * w * max(rs))
-            res.append(0.5 * w * (max(rs) - min(rs)))
+        samples.append((r, t, w))
+    if not samples:
+        return [0.0]
+
+    w_sum = sum(w for _, _, w in samples)
+    # r_i = sqrt(2 * w_i / W) * (R_i - t_i)  ⇒  0.5 * Σ r_i² = Σ w (R-t)² / W = MSE
+    res = [
+        math.sqrt(2.0 * w / w_sum) * (r - t) for r, t, w in samples
+    ]
     if thickness_weight > 0 and layers:
         total = sum(d for _, d in layers)
-        res.append(math.sqrt(thickness_weight) * total / thickness_ref)
-    if not res:
-        res = [0.0]
+        res.append(math.sqrt(2.0 * thickness_weight) * total / thickness_ref)
     return res
 
 
 class MaxMinROptimizer(LMThicknessOptimizer):
-    """Adam/LM thickness optimiser with per-band R maximize/minimize goals."""
+    """Adam/LM thickness optimiser minimizing MSE(R, R_target)."""
 
     def __init__(
         self,
@@ -207,6 +248,9 @@ class MaxMinROptimizer(LMThicknessOptimizer):
             [b.as_band_spec() for b in rbands],
             **kwargs,
         )
+        self._targets, self._target_weights = build_r_target_curve(
+            self.rbands, self.wavelengths
+        )
 
     def residuals(self, layers: Sequence[tuple[str, float]]) -> list[float]:
         R, _T = self._rt(layers)
@@ -217,6 +261,16 @@ class MaxMinROptimizer(LMThicknessOptimizer):
             R,
             thickness_weight=self.thickness_weight,
         )
+
+    def cost(self, layers: Sequence[tuple[str, float]]) -> float:
+        """Return MSE(R, target); matches ``0.5*||residuals||^2`` when
+        ``thickness_weight==0``."""
+        R, _T = self._rt(layers)
+        mse = reflectance_mse(R, self._targets, self._target_weights)
+        if self.thickness_weight > 0 and layers:
+            total = sum(d for _, d in layers)
+            mse += self.thickness_weight * (total / 1000e-9) ** 2
+        return mse
 
 
 def nk_table(
@@ -274,7 +328,7 @@ def write_stack_txt(
 def write_loss_history(path: str, history: list[float], best_iter: int) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write("iter,loss,is_best\n")
+        fh.write("iter,mse,is_best\n")
         for i, loss in enumerate(history):
             flag = 1 if i == best_iter else 0
             fh.write(f"{i},{loss:.12e},{flag}\n")
@@ -343,7 +397,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         polarization=pol,
         substrate_model="semi_infinite",
         wavelength_step=_NM * float(cfg.get("wavelength_step_nm", 10)),
-        thickness_weight=float(cfg.get("thickness_weight", 0.02)),
+        thickness_weight=float(cfg.get("thickness_weight", 0.0)),
         fd_step=_NM * float(cfg.get("fd_step_nm", 0.5)),
         lambda0=float(cfg.get("lambda0", 1e-2)),
         max_iter=int(cfg.get("max_iter", 40)),
@@ -355,7 +409,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         adam_max_step=_NM * float(cfg.get("adam_max_step_nm", 10.0)),
     )
 
-    print("Text-stack R max/min thickness optimiser")
+    print("Text-stack R-target MSE thickness optimiser")
     print(f"  stack: {stack_path}")
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
@@ -371,9 +425,9 @@ def run(stack_path: str, cfg_path: str) -> int:
         f"  free coating layers: {len(layers0)}  "
         f"(incident/substrate thicknesses not optimised)"
     )
-    print(f"  n_bands: {len(rbands)}")
+    print(f"  objective: MSE(R, R_target)  n_bands: {len(rbands)}")
     for b in rbands:
-        goal = "maximize" if b.maximize else "minimize"
+        goal = "maximize→1" if b.maximize else "minimize→0"
         print(
             f"    {b.wl_lo / _NM:.0f}–{b.wl_hi / _NM:.0f} nm  "
             f"R {goal}  weight={b.weight:g}"
@@ -394,7 +448,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     print_band_report("Before", layers0, rbands, opt.wavelengths, opt._rt(layers0)[0])
 
     result = opt.optimize(layers0, free_indices=free_indices, verbose=True)
-    # Always keep the iterate with the lowest loss seen during optimisation.
+    # Always keep the iterate with the lowest MSE seen during optimisation.
     layers_best = result.layers
     best_cost = result.cost
     best_iter = result.best_iter
@@ -407,14 +461,14 @@ def run(stack_path: str, cfg_path: str) -> int:
         polarization=pol,
     )
     print_band_report(
-        f"Best loss (iter {best_iter})",
+        f"Best MSE (iter {best_iter})",
         layers_best,
         rbands,
         opt.wavelengths,
         opt._rt(layers_best)[0],
     )
     print(
-        f"\n  best loss={best_cost:.6e} at iter {best_iter}  "
+        f"\n  best MSE={best_cost:.6e} at iter {best_iter}  "
         f"(ran {result.n_iter} iters, {result.message})"
     )
 
@@ -449,7 +503,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         T1,
         bands=[b.as_band_spec() for b in rbands],
         title=(
-            f"{os.path.basename(stack_path)} best loss "
+            f"{os.path.basename(stack_path)} best MSE "
             f"({method.upper()} iter {best_iter})"
         ),
     )
@@ -461,10 +515,11 @@ def run(stack_path: str, cfg_path: str) -> int:
         nk,
         film_indices=film_indices,
         header_lines=[
-            f"# best-loss stack  method={method}  "
-            f"loss={best_cost:.12e}  best_iter={best_iter}  "
+            f"# best-MSE stack  method={method}  "
+            f"mse={best_cost:.12e}  best_iter={best_iter}  "
             f"n_iter={result.n_iter}",
             "# incident and substrate thicknesses fixed (not optimised)",
+            "# R_target: minimize bands → 0, maximize bands → 1",
         ],
     )
     # Alias for callers expecting the previous filename.
@@ -476,8 +531,8 @@ def run(stack_path: str, cfg_path: str) -> int:
         nk,
         film_indices=film_indices,
         header_lines=[
-            f"# best-loss stack (same as stack_best.txt)  "
-            f"loss={best_cost:.12e}  best_iter={best_iter}",
+            f"# best-MSE stack (same as stack_best.txt)  "
+            f"mse={best_cost:.12e}  best_iter={best_iter}",
             "# incident and substrate thicknesses fixed (not optimised)",
         ],
     )
