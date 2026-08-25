@@ -5,7 +5,9 @@ thicknesses only; the first row (incident medium) and last row (substrate)
 are never free variables — their thicknesses stay exactly as in the input.
 
 Objective: build a piecewise R target (minimize bands → 0, maximize → 1)
-over the union of the N bands, then minimise MSE(R, R_target).
+over the union of the N bands, then minimise mean(|R−target|^p) plus optional
+peak-suppression terms (``smooth_weight``, ``ripple_weight``; raise
+``error_power`` above 2 to overweight sharp outliers).
 
 Usage::
 
@@ -180,8 +182,13 @@ def reflectance_mse(
     R: Sequence[float],
     targets: Sequence[float | None],
     weights: Sequence[float],
+    *,
+    error_power: float = 2.0,
 ) -> float:
-    """Weighted MSE of R vs target curve (samples with target=None skipped)."""
+    """Weighted mean of |R - target|^p (p=2 → MSE)."""
+    p = float(error_power)
+    if p <= 0:
+        raise ValueError(f"error_power must be > 0, got {error_power}")
     num = 0.0
     den = 0.0
     for r, t, w in zip(R, targets, weights):
@@ -190,12 +197,62 @@ def reflectance_mse(
         ww = max(w, 0.0)
         if ww <= 0.0:
             continue
-        err = r - t
-        num += ww * err * err
+        num += ww * abs(r - t) ** p
         den += ww
     if den <= 0.0:
         return 0.0
     return num / den
+
+
+def _band_sample_indices(
+    bands: Sequence[RObjectiveBand],
+    wavelengths: Sequence[float],
+) -> list[list[int]]:
+    """Sorted wavelength indices belonging to each band."""
+    out: list[list[int]] = []
+    for b in bands:
+        idx = [
+            i
+            for i, wl in enumerate(wavelengths)
+            if b.wl_lo - 1e-15 <= wl <= b.wl_hi + 1e-15
+        ]
+        out.append(idx)
+    return out
+
+
+def peak_suppression_penalty(
+    R: Sequence[float],
+    bands: Sequence[RObjectiveBand],
+    wavelengths: Sequence[float],
+    *,
+    smooth_weight: float,
+    ripple_weight: float,
+) -> float:
+    """Smoothness + in-band ripple terms that discourage sharp peaks."""
+    pen = 0.0
+    band_indices = _band_sample_indices(bands, wavelengths)
+
+    if smooth_weight > 0:
+        diffs: list[float] = []
+        for idx in band_indices:
+            for a, b in zip(idx, idx[1:]):
+                # Only consecutive samples on the global grid.
+                if b == a + 1:
+                    diffs.append(R[b] - R[a])
+        if diffs:
+            pen += smooth_weight * (sum(d * d for d in diffs) / len(diffs))
+
+    if ripple_weight > 0:
+        ripples: list[float] = []
+        for idx in band_indices:
+            if len(idx) < 2:
+                continue
+            rs = [R[i] for i in idx]
+            ripples.append(max(rs) - min(rs))
+        if ripples:
+            pen += ripple_weight * (sum(x * x for x in ripples) / len(ripples))
+
+    return pen
 
 
 def build_maxmin_r_residuals(
@@ -206,13 +263,26 @@ def build_maxmin_r_residuals(
     *,
     thickness_weight: float = 0.0,
     thickness_ref: float = 1000e-9,
+    error_power: float = 2.0,
+    smooth_weight: float = 0.0,
+    ripple_weight: float = 0.0,
 ) -> list[float]:
-    """Residuals so that ``0.5 * sum(r**2)`` equals the R-target MSE.
+    """Residuals for target fit + optional peak-suppression regularisers.
 
-    Target curve: minimize bands → 0, maximize bands → 1. Per-sample weight
-    comes from the band ``weight``. Optional thickness penalty is added only
-    when ``thickness_weight > 0`` (then the scalar is no longer pure MSE).
+    Base term: weighted mean of |R - R_target|^p with
+    minimize→0, maximize→1.  Residuals are scaled so
+    ``0.5 * sum(r**2)`` equals that mean (plus regularisers).
+
+    Peak suppression (recommended against sharp spikes)::
+
+      - ``error_power`` > 2 (e.g. 4): overweight large |R−target| outliers
+      - ``smooth_weight``: penalise (ΔR)² along λ inside each band
+      - ``ripple_weight``: penalise in-band (R_max − R_min)²
     """
+    p = float(error_power)
+    if p <= 0:
+        raise ValueError(f"error_power must be > 0, got {error_power}")
+
     targets, weights = build_r_target_curve(bands, wavelengths)
     samples: list[tuple[float, float, float]] = []
     for r, t, w in zip(R, targets, weights):
@@ -223,10 +293,40 @@ def build_maxmin_r_residuals(
         return [0.0]
 
     w_sum = sum(w for _, _, w in samples)
-    # r_i = sqrt(2 * w_i / W) * (R_i - t_i)  ⇒  0.5 * Σ r_i² = Σ w (R-t)² / W = MSE
-    res = [
-        math.sqrt(2.0 * w / w_sum) * (r - t) for r, t, w in samples
-    ]
+    # r_i = sqrt(2 w_i/W) * sign(e) * |e|^(p/2)
+    # ⇒ 0.5 Σ r² = Σ w |e|^p / W
+    res: list[float] = []
+    for r, t, w in samples:
+        e = r - t
+        mag = abs(e) ** (p / 2.0)
+        signed = mag if e >= 0.0 else -mag
+        res.append(math.sqrt(2.0 * w / w_sum) * signed)
+
+    band_indices = _band_sample_indices(bands, wavelengths)
+
+    if smooth_weight > 0:
+        pairs: list[tuple[int, int]] = []
+        for idx in band_indices:
+            for a, b in zip(idx, idx[1:]):
+                if b == a + 1:
+                    pairs.append((a, b))
+        if pairs:
+            scale = math.sqrt(2.0 * smooth_weight / len(pairs))
+            for a, b in pairs:
+                res.append(scale * (R[b] - R[a]))
+
+    if ripple_weight > 0:
+        ripples: list[float] = []
+        for idx in band_indices:
+            if len(idx) < 2:
+                continue
+            rs = [R[i] for i in idx]
+            ripples.append(max(rs) - min(rs))
+        if ripples:
+            scale = math.sqrt(2.0 * ripple_weight / len(ripples))
+            for amp in ripples:
+                res.append(scale * amp)
+
     if thickness_weight > 0 and layers:
         total = sum(d for _, d in layers)
         res.append(math.sqrt(2.0 * thickness_weight) * total / thickness_ref)
@@ -234,15 +334,22 @@ def build_maxmin_r_residuals(
 
 
 class MaxMinROptimizer(LMThicknessOptimizer):
-    """Adam/LM thickness optimiser minimizing MSE(R, R_target)."""
+    """Adam/LM thickness optimiser minimizing target MSE (+ peak penalties)."""
 
     def __init__(
         self,
         calculator: RTCalculator,
         rbands: Sequence[RObjectiveBand],
+        *,
+        error_power: float = 2.0,
+        smooth_weight: float = 0.0,
+        ripple_weight: float = 0.0,
         **kwargs,
     ):
         self.rbands = list(rbands)
+        self.error_power = float(error_power)
+        self.smooth_weight = float(smooth_weight)
+        self.ripple_weight = float(ripple_weight)
         super().__init__(
             calculator,
             [b.as_band_spec() for b in rbands],
@@ -260,17 +367,31 @@ class MaxMinROptimizer(LMThicknessOptimizer):
             self.wavelengths,
             R,
             thickness_weight=self.thickness_weight,
+            error_power=self.error_power,
+            smooth_weight=self.smooth_weight,
+            ripple_weight=self.ripple_weight,
         )
 
     def cost(self, layers: Sequence[tuple[str, float]]) -> float:
-        """Return MSE(R, target); matches ``0.5*||residuals||^2`` when
-        ``thickness_weight==0``."""
+        """Target fit + peak-suppression terms (matches ``0.5*||r||^2``)."""
         R, _T = self._rt(layers)
-        mse = reflectance_mse(R, self._targets, self._target_weights)
+        loss = reflectance_mse(
+            R,
+            self._targets,
+            self._target_weights,
+            error_power=self.error_power,
+        )
+        loss += peak_suppression_penalty(
+            R,
+            self.rbands,
+            self.wavelengths,
+            smooth_weight=self.smooth_weight,
+            ripple_weight=self.ripple_weight,
+        )
         if self.thickness_weight > 0 and layers:
             total = sum(d for _, d in layers)
-            mse += self.thickness_weight * (total / 1000e-9) ** 2
-        return mse
+            loss += self.thickness_weight * (total / 1000e-9) ** 2
+        return loss
 
 
 def nk_table(
@@ -388,6 +509,9 @@ def run(stack_path: str, cfg_path: str) -> int:
         )
 
     calc = ConstantNkCalculator(nk)
+    error_power = float(cfg.get("error_power", 2.0))
+    smooth_weight = float(cfg.get("smooth_weight", 0.0))
+    ripple_weight = float(cfg.get("ripple_weight", 0.0))
     opt = MaxMinROptimizer(
         calc,
         rbands,
@@ -398,6 +522,9 @@ def run(stack_path: str, cfg_path: str) -> int:
         substrate_model="semi_infinite",
         wavelength_step=_NM * float(cfg.get("wavelength_step_nm", 10)),
         thickness_weight=float(cfg.get("thickness_weight", 0.0)),
+        error_power=error_power,
+        smooth_weight=smooth_weight,
+        ripple_weight=ripple_weight,
         fd_step=_NM * float(cfg.get("fd_step_nm", 0.5)),
         lambda0=float(cfg.get("lambda0", 1e-2)),
         max_iter=int(cfg.get("max_iter", 40)),
@@ -425,7 +552,11 @@ def run(stack_path: str, cfg_path: str) -> int:
         f"  free coating layers: {len(layers0)}  "
         f"(incident/substrate thicknesses not optimised)"
     )
-    print(f"  objective: MSE(R, R_target)  n_bands: {len(rbands)}")
+    print(
+        f"  objective: mean(|R−target|^{error_power:g}) "
+        f"+ smooth={smooth_weight:g} + ripple={ripple_weight:g}"
+    )
+    print(f"  n_bands: {len(rbands)}")
     for b in rbands:
         goal = "maximize→1" if b.maximize else "minimize→0"
         print(
