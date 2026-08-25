@@ -81,12 +81,23 @@ def parse_layers(raw: list[dict]) -> list[tuple[str, float]]:
 
 
 def build_chirped_seed(seed: dict) -> list[tuple[str, float]]:
-    """Quarter-wave chirped TiO2/SiO2 (or custom cell) starting stack."""
+    """Quarter-wave chirped TiO2/SiO2 (or custom cell) starting stack.
+
+    ``periods_per_centre`` may be an int (same for all centres) or a list
+    matching ``centres_nm`` (e.g. fewer periods at short λ to ease visible
+    harmonics).
+    """
     centres = [_nm(float(c)) for c in seed.get("centres_nm", [900, 1200, 1500])]
-    periods = int(seed.get("periods_per_centre", 3))
+    raw_p = seed.get("periods_per_centre", 3)
+    if isinstance(raw_p, list):
+        if len(raw_p) != len(centres):
+            raise ValueError("periods_per_centre list must match centres_nm")
+        periods_list = [int(p) for p in raw_p]
+    else:
+        periods_list = [int(raw_p)] * len(centres)
     cell = [str(m).lower() for m in seed.get("cell", ["tio2", "sio2"])]
     layers: list[tuple[str, float]] = []
-    for lam0 in centres:
+    for lam0, periods in zip(centres, periods_list):
         for _ in range(periods):
             for mat in cell:
                 if mat not in dsp.MATERIALS:
@@ -312,12 +323,19 @@ def run(cfg: dict, input_path: str) -> int:
         "fd_step": _nm(float(opt_cfg.get("fd_step_nm", 0.5))),
         "lambda0": float(opt_cfg.get("lambda0", 1e-2)),
         "max_iter": int(opt_cfg.get("max_iter", 40)),
+        "method": str(opt_cfg.get("method", "lm")),
+        "adam_lr": _nm(float(opt_cfg.get("adam_lr_nm", 2.0))),
+        "adam_beta1": float(opt_cfg.get("adam_beta1", 0.9)),
+        "adam_beta2": float(opt_cfg.get("adam_beta2", 0.999)),
+        "adam_eps": float(opt_cfg.get("adam_eps", 1e-8)),
+        "adam_max_step": _nm(float(opt_cfg.get("adam_max_step_nm", 10.0))),
     }
     optimizer = make_optimizer_from_config(calc, bands, lm_kwargs)
 
     print("IR / optical thin-film optimiser", flush=True)
     print(f"  input: {input_path}", flush=True)
     print(f"  angle: {angle_deg} deg  engine: {cfg.get('rt_engine', 'tmm')}", flush=True)
+    print(f"  thickness method: {lm_kwargs['method']}", flush=True)
     print(f"  substrate_model: {substrate_model}", flush=True)
     print(f"  default materials: {', '.join(DEFAULT_MATERIALS)}", flush=True)
     print(f"  library materials: {', '.join(sorted(dsp.MATERIALS))}", flush=True)
@@ -347,13 +365,17 @@ def run(cfg: dict, input_path: str) -> int:
             low_index=opt_cfg.get("low_index", "sio2"),
             max_layers=int(opt_cfg.get("max_layers", 24)),
             max_add_rounds=int(opt_cfg.get("max_add_rounds", 20)),
+            n_design_centres=int(opt_cfg.get("n_design_centres", 8)),
+            ar_layers=int(opt_cfg.get("ar_layers", 4)),
+            ar_add_rounds=int(opt_cfg.get("ar_add_rounds", 4)),
+            front_free_extra=int(opt_cfg.get("front_free_extra", 6)),
         )
         result = synth.run(layers0, verbose=True)
         layers1 = result.layers
         ok1 = result.specs_ok
         report1 = result.report
     else:
-        print("  LM thickness optimisation only (fixed layer count)")
+        print(f"  {lm_kwargs['method'].upper()} thickness optimisation only (fixed layer count)")
         lm = optimizer.optimize(layers0, verbose=True)
         layers1 = lm.layers
         _, _, ok1, report1 = optimizer.evaluate(layers1)

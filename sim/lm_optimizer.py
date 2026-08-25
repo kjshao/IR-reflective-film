@@ -60,22 +60,16 @@ def wavelength_grid(bands: Sequence[BandSpec], step: float) -> list[float]:
     return sorted(pts)
 
 
-def _infer_targets(b: BandSpec) -> tuple[float | None, float | None]:
-    r_t, t_t = b.R_target, b.T_target
-    if r_t is None:
-        if b.R_min is not None and b.R_max is None:
-            r_t = min(1.0, b.R_min + 0.20)
-        elif b.R_max is not None and b.R_min is None:
-            r_t = 0.0
-        elif b.R_min is not None and b.R_max is not None:
-            r_t = 0.5 * (b.R_min + b.R_max)
-    if t_t is None:
-        if b.T_min is not None and b.T_max is None:
-            t_t = min(1.0, b.T_min + 0.02)
-        elif b.T_max is not None and b.T_min is None:
-            t_t = 0.0
-        elif b.T_min is not None and b.T_max is not None:
-            t_t = 0.5 * (b.T_min + b.T_max)
+# Per-sample pull toward total reflection (R → 1, T → 0).
+_DRIVE_SCALE = 0.5
+# In-band peak-to-peak (max − min); damps visible ripple vs a wider IR stop.
+_RIPPLE_SCALE = 1.5
+
+
+def _infer_targets(b: BandSpec) -> tuple[float, float]:
+    """High-reflector defaults: R_target=1, T_target=0."""
+    r_t = 1.0 if b.R_target is None else b.R_target
+    t_t = 0.0 if b.T_target is None else b.T_target
     return r_t, t_t
 
 
@@ -89,14 +83,14 @@ def build_residuals(
     thickness_weight: float = 0.02,
     thickness_ref: float = 1000e-9,
 ) -> list[float]:
-    """Inequality residuals always; thickness/smooth only when feasible.
+    """Residuals for broadband total reflection (visible + infrared).
 
-    Soft inequalities stay in the residual vector even when currently zero so
-    that a subsequent thickness-minimisation step cannot quietly violate them
-    without a restoring gradient.
+    Every band is a high reflector. Per-sample terms are scaled by
+    ``1/sqrt(n)`` so a wider IR grid cannot drown the visible band.
+    A peak-to-peak ripple term flattens in-band oscillation.
     """
     ineq: list[float] = []
-    smooth: list[float] = []
+    drive: list[float] = []
     for b in bands:
         w = math.sqrt(max(b.weight, 0.0))
         r_t, t_t = _infer_targets(b)
@@ -107,28 +101,27 @@ def build_residuals(
                 ts.append(t)
         if not rs:
             continue
-        r_mean = sum(rs) / len(rs)
-        t_mean = sum(ts) / len(ts)
+        wn = w / math.sqrt(len(rs))
+        for r, t in zip(rs, ts):
+            if b.R_min is not None:
+                ineq.append(wn * max(0.0, b.R_min - r))
+            if b.T_max is not None:
+                ineq.append(wn * max(0.0, t - b.T_max))
+            drive.append(_DRIVE_SCALE * wn * max(0.0, r_t - r))
+            drive.append(_DRIVE_SCALE * wn * max(0.0, t - t_t))
         if b.R_min is not None:
-            ineq.append(w * max(0.0, b.R_min - min(rs)))
-        if b.R_max is not None:
-            ineq.append(w * max(0.0, max(rs) - b.R_max))
-        if b.T_min is not None:
-            ineq.append(w * max(0.0, b.T_min - min(ts)))
+            ineq.append(2.0 * w * max(0.0, b.R_min - min(rs)))
+            ineq.append(0.8 * w * max(0.0, (b.R_min + 0.08) - min(rs)))
         if b.T_max is not None:
-            ineq.append(w * max(0.0, max(ts) - b.T_max))
-        if r_t is not None:
-            smooth.append(0.35 * w * (r_mean - r_t))
-        if t_t is not None:
-            smooth.append(0.35 * w * (t_mean - t_t))
+            ineq.append(1.5 * w * max(0.0, max(ts) - b.T_max))
+        drive.append(_RIPPLE_SCALE * w * (max(rs) - min(rs)))
+        drive.append(_RIPPLE_SCALE * w * (max(ts) - min(ts)))
 
     feasible = all(abs(v) <= 1e-12 for v in ineq)
-    res = list(ineq)
-    if feasible:
-        res.extend(smooth)
-        if thickness_weight > 0 and layers:
-            total = sum(d for _, d in layers)
-            res.append(math.sqrt(thickness_weight) * total / thickness_ref)
+    res = ineq + drive
+    if feasible and thickness_weight > 0 and layers:
+        total = sum(d for _, d in layers)
+        res.append(math.sqrt(thickness_weight) * total / thickness_ref)
     if not res:
         res = [0.0]
     return res
@@ -195,7 +188,7 @@ def band_report(
 
 
 class LMThicknessOptimizer:
-    """Levenberg-Marquardt optimiser over layer thicknesses only."""
+    """Thickness optimiser: Levenberg-Marquardt (default) or Adam."""
 
     def __init__(
         self,
@@ -215,6 +208,12 @@ class LMThicknessOptimizer:
         lambda0: float = 1e-2,
         max_iter: int = 40,
         tol: float = 1e-8,
+        method: str = "lm",
+        adam_lr: float = 2e-9,
+        adam_beta1: float = 0.9,
+        adam_beta2: float = 0.999,
+        adam_eps: float = 1e-8,
+        adam_max_step: float = 10e-9,
     ):
         self.calc = calculator
         self.bands = list(bands)
@@ -231,6 +230,12 @@ class LMThicknessOptimizer:
         self.lambda0 = lambda0
         self.max_iter = max_iter
         self.tol = tol
+        self.method = (method or "lm").lower()
+        self.adam_lr = adam_lr
+        self.adam_beta1 = adam_beta1
+        self.adam_beta2 = adam_beta2
+        self.adam_eps = adam_eps
+        self.adam_max_step = adam_max_step
 
     def _rt(self, layers: Sequence[tuple[str, float]]):
         return self.calc.spectrum(
@@ -267,12 +272,19 @@ class LMThicknessOptimizer:
             out.append(min(hi, max(lo, d)))
         return out
 
-    def _jacobian(self, materials: Sequence[str], x: list[float], r0: list[float]):
-        """Forward-difference Jacobian, shape (m, n)."""
+    def _jacobian(
+        self,
+        materials: Sequence[str],
+        x: list[float],
+        r0: list[float],
+        free_indices: Sequence[int] | None = None,
+    ):
+        """Forward-difference Jacobian; only columns in ``free_indices`` are filled."""
         n = len(x)
         m = len(r0)
+        free = list(range(n)) if free_indices is None else list(free_indices)
         J = [[0.0] * n for _ in range(m)]
-        for j in range(n):
+        for j in free:
             step = self.fd_step
             lo, hi = _bounds_for(materials[j])
             xp = list(x)
@@ -288,7 +300,7 @@ class LMThicknessOptimizer:
             sign = 1.0 if xp[j] > x[j] else -1.0
             for i in range(m):
                 J[i][j] = sign * (rp[i] - r0[i]) / abs(denom)
-        return J
+        return J, free
 
     @staticmethod
     def _jtj_jtr(J, r):
@@ -329,30 +341,43 @@ class LMThicknessOptimizer:
         *,
         rounds: int = 8,
         step0: float = 8e-9,
+        free_indices: Sequence[int] | None = None,
+        accept_fn=None,
         verbose: bool = True,
     ) -> OptimResult:
-        """Bounded coordinate descent — larger steps than LM finite differences."""
+        """Bounded coordinate descent — larger steps than LM finite differences.
+
+        ``accept_fn(layers) -> bool``: optional hard filter (e.g. keep IR stop).
+        """
         materials = [m for m, _ in layers]
         x = self._project(materials, [d for _, d in layers])
+        free = list(range(len(x))) if free_indices is None else list(free_indices)
         best = list(zip(materials, x))
+        if accept_fn is not None and not accept_fn(best):
+            # Starting point must be acceptable; otherwise ignore the filter.
+            accept_fn = None
         best_cost = self.cost(best)
         history = [best_cost]
         step = step0
         if verbose:
             print(
-                f"    coarse start: cost={best_cost:.6e}  step={step*1e9:.1f} nm",
+                f"    coarse start: cost={best_cost:.6e}  step={step*1e9:.1f} nm  "
+                f"free={len(free)}/{len(x)}"
+                + ("  [constrained]" if accept_fn else ""),
                 flush=True,
             )
         for r in range(1, rounds + 1):
             improved = False
-            for j in range(len(x)):
-                for delta in (step, -step):
+            for j in free:
+                for delta in (step, -step, 2 * step, -2 * step):
                     trial_x = list(x)
                     trial_x[j] = trial_x[j] + delta
                     trial_x = self._project(materials, trial_x)
                     if abs(trial_x[j] - x[j]) < 1e-15:
                         continue
                     trial = list(zip(materials, trial_x))
+                    if accept_fn is not None and not accept_fn(trial):
+                        continue
                     c = self.cost(trial)
                     if c < best_cost - 1e-12:
                         best, best_cost, x = trial, c, trial_x
@@ -372,14 +397,155 @@ class LMThicknessOptimizer:
             best, best_cost, self.residuals(best), len(history) - 1, True, "coarse", history
         )
 
+    def _cost_gradient(
+        self,
+        materials: Sequence[str],
+        x: list[float],
+        c0: float,
+        free_indices: Sequence[int] | None = None,
+    ):
+        """Forward-difference ∇cost; only ``free_indices`` are filled."""
+        n = len(x)
+        free = list(range(n)) if free_indices is None else list(free_indices)
+        g = [0.0] * n
+        for j in free:
+            step = self.fd_step
+            lo, hi = _bounds_for(materials[j])
+            xp = list(x)
+            if x[j] + step <= hi:
+                xp[j] = x[j] + step
+                denom = step
+                sign = 1.0
+            else:
+                xp[j] = max(lo, x[j] - step)
+                denom = x[j] - xp[j]
+                if denom <= 0:
+                    continue
+                sign = -1.0
+            cp = self.cost(list(zip(materials, xp)))
+            g[j] = sign * (cp - c0) / abs(denom)
+        return g, free
+
     def optimize(
         self,
         layers: Sequence[tuple[str, float]],
         *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        if self.method == "adam":
+            return self._optimize_adam(
+                layers, free_indices=free_indices, verbose=verbose
+            )
+        if self.method not in ("lm", "levenberg", "levenberg-marquardt"):
+            raise ValueError(
+                f"unknown optimizer method {self.method!r}; use 'lm' or 'adam'"
+            )
+        return self._optimize_lm(layers, free_indices=free_indices, verbose=verbose)
+
+    def _optimize_adam(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        """Adam on layer thicknesses (projected onto material bounds)."""
+        materials = [m for m, _ in layers]
+        x = self._project(materials, [d for _, d in layers])
+        free = list(range(len(x))) if free_indices is None else list(free_indices)
+        r = self.residuals(list(zip(materials, x)))
+        cost = 0.5 * sum(v * v for v in r)
+        history = [cost]
+        best_x, best_cost, best_r = list(x), cost, r
+
+        m = [0.0] * len(x)
+        v = [0.0] * len(x)
+        lr = self.adam_lr
+        b1, b2, eps = self.adam_beta1, self.adam_beta2, self.adam_eps
+        max_step = self.adam_max_step
+        stale = 0
+
+        if verbose:
+            print(
+                f"    Adam start: cost={cost:.6e}  layers={len(materials)}  "
+                f"free={len(free)}  lr={lr*1e9:.2f} nm",
+                flush=True,
+            )
+
+        for it in range(1, self.max_iter + 1):
+            g, free_cols = self._cost_gradient(materials, x, cost, free)
+            if not free_cols:
+                break
+            b1t = 1.0 - b1**it
+            b2t = 1.0 - b2**it
+            delta = [0.0] * len(x)
+            for j in free_cols:
+                gj = g[j]
+                m[j] = b1 * m[j] + (1.0 - b1) * gj
+                v[j] = b2 * v[j] + (1.0 - b2) * gj * gj
+                mhat = m[j] / b1t
+                vhat = v[j] / b2t
+                step = lr * mhat / (math.sqrt(vhat) + eps)
+                if step > max_step:
+                    step = max_step
+                elif step < -max_step:
+                    step = -max_step
+                delta[j] = -step
+
+            x = self._project(materials, [x[i] + delta[i] for i in range(len(x))])
+            r = self.residuals(list(zip(materials, x)))
+            cost = 0.5 * sum(v_i * v_i for v_i in r)
+            history.append(cost)
+            step_norm = math.sqrt(sum(d * d for d in delta))
+
+            if cost < best_cost - 1e-12:
+                best_x, best_cost, best_r = list(x), cost, r
+                stale = 0
+            else:
+                stale += 1
+                if stale >= 8:
+                    lr = max(lr * 0.5, 0.05e-9)
+                    stale = 0
+
+            if verbose and (it == 1 or it % 5 == 0 or it == self.max_iter):
+                print(
+                    f"    Adam iter {it:3d}: cost={cost:.6e}  "
+                    f"best={best_cost:.6e}  lr={lr*1e9:.2f} nm  "
+                    f"Σd={sum(x)*1e9:.1f} nm",
+                    flush=True,
+                )
+            if step_norm < 1e-12 or best_cost < self.tol:
+                return OptimResult(
+                    list(zip(materials, best_x)),
+                    best_cost,
+                    best_r,
+                    it,
+                    True,
+                    "converged",
+                    history,
+                )
+
+        return OptimResult(
+            list(zip(materials, best_x)),
+            best_cost,
+            best_r,
+            self.max_iter,
+            best_cost < history[0],
+            "max_iter",
+            history,
+        )
+
+    def _optimize_lm(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
         verbose: bool = True,
     ) -> OptimResult:
         materials = [m for m, _ in layers]
         x = self._project(materials, [d for _, d in layers])
+        free = list(range(len(x))) if free_indices is None else list(free_indices)
         lam = self.lambda0
         history: list[float] = []
         r = self.residuals(list(zip(materials, x)))
@@ -387,40 +553,39 @@ class LMThicknessOptimizer:
         history.append(cost)
 
         if verbose:
-            print(f"    LM start: cost={cost:.6e}  layers={len(materials)}")
+            print(
+                f"    LM start: cost={cost:.6e}  layers={len(materials)}  "
+                f"free={len(free)}",
+                flush=True,
+            )
 
         for it in range(1, self.max_iter + 1):
-            J = self._jacobian(materials, x, r)
-            A, g = self._jtj_jtr(J, r)
-            n = len(x)
-            if n == 0:
+            J, free_cols = self._jacobian(materials, x, r, free)
+            # Reduce to free subspace for the linear solve.
+            nf = len(free_cols)
+            if nf == 0:
                 break
+            Jf = [[row[j] for j in free_cols] for row in J]
+            A, g = self._jtj_jtr(Jf, r)
 
-            # Damping on diagonal (Levenberg).
             Ad = [row[:] for row in A]
-            for i in range(n):
+            for i in range(nf):
                 Ad[i][i] += lam * (A[i][i] + 1e-12)
-            # Solve (J^T J + λ diag) δ = -J^T r
             rhs = [-gi for gi in g]
-            delta = self._solve_linear(Ad, rhs)
-            if delta is None:
+            delta_f = self._solve_linear(Ad, rhs)
+            if delta_f is None:
                 lam = min(lam * 10.0, 1e8)
                 continue
 
-            x_trial = self._project(materials, [x[i] + delta[i] for i in range(n)])
+            delta = [0.0] * len(x)
+            for k, j in enumerate(free_cols):
+                delta[j] = delta_f[k]
+
+            x_trial = self._project(materials, [x[i] + delta[i] for i in range(len(x))])
             r_trial = self.residuals(list(zip(materials, x_trial)))
             cost_trial = 0.5 * sum(v * v for v in r_trial)
 
-            # Actual vs predicted reduction (Marquardt gain ratio).
-            pred = 0.0
-            for i in range(n):
-                pred += -g[i] * delta[i]
-                for k in range(n):
-                    pred += 0.5 * delta[i] * A[i][k] * delta[k]
-            # Prefer simple accept/reject on cost for soft inequalities.
-            if cost_trial < cost * (1.0 - 1e-12) or (
-                abs(cost_trial - cost) < self.tol and pred > 0
-            ):
+            if cost_trial < cost * (1.0 - 1e-12):
                 step_norm = math.sqrt(sum(d * d for d in delta))
                 x, r, cost = x_trial, r_trial, cost_trial
                 history.append(cost)
@@ -429,7 +594,8 @@ class LMThicknessOptimizer:
                     total_nm = sum(x) * 1e9
                     print(
                         f"    LM iter {it:3d}: cost={cost:.6e}  "
-                        f"λ={lam:.2e}  Σd={total_nm:.1f} nm"
+                        f"λ={lam:.2e}  Σd={total_nm:.1f} nm",
+                        flush=True,
                     )
                 if step_norm < 1e-12 or cost < self.tol:
                     return OptimResult(
