@@ -240,13 +240,18 @@ def write_stack_txt(
     films: list[tuple[str, float]],
     substrate: StackRow,
     nk: dict[str, complex],
+    *,
+    header_lines: list[str] | None = None,
 ) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    lines = [
-        "# index  material  thickness_nm  n  k",
+    lines: list[str] = []
+    if header_lines:
+        lines.extend(header_lines)
+    lines.append("# index  material  thickness_nm  n  k")
+    lines.append(
         f"0  {incident.material}  0  {nk[incident.material.lower()].real:.6g}  "
-        f"{nk[incident.material.lower()].imag:.6g}",
-    ]
+        f"{nk[incident.material.lower()].imag:.6g}"
+    )
     for i, (mat, d) in enumerate(films, 1):
         N = nk[mat.lower()]
         lines.append(
@@ -260,6 +265,15 @@ def write_stack_txt(
     )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
+
+
+def write_loss_history(path: str, history: list[float], best_iter: int) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("iter,loss,is_best\n")
+        for i, loss in enumerate(history):
+            flag = 1 if i == best_iter else 0
+            fh.write(f"{i},{loss:.12e},{flag}\n")
 
 
 def print_band_report(
@@ -361,24 +375,37 @@ def run(stack_path: str, cfg_path: str) -> int:
     print_band_report("Before", layers0, rbands, opt.wavelengths, opt._rt(layers0)[0])
 
     result = opt.optimize(layers0, verbose=True)
-    layers1 = result.layers
+    # Always keep the iterate with the lowest loss seen during optimisation.
+    layers_best = result.layers
+    best_cost = result.cost
+    best_iter = result.best_iter
     R1, T1 = calc.spectrum(
-        layers1,
+        layers_best,
         plot_wls,
         theta0,
         incident=incident.material,
         substrate=substrate.material,
         polarization=pol,
     )
-    print_band_report("After", layers1, rbands, opt.wavelengths, opt._rt(layers1)[0])
-    print(f"\n  final cost={result.cost:.6e}  iters={result.n_iter}  ({result.message})")
+    print_band_report(
+        f"Best loss (iter {best_iter})",
+        layers_best,
+        rbands,
+        opt.wavelengths,
+        opt._rt(layers_best)[0],
+    )
+    print(
+        f"\n  best loss={best_cost:.6e} at iter {best_iter}  "
+        f"(ran {result.n_iter} iters, {result.message})"
+    )
 
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, "spectrum_before_after.csv")
     plot_path = os.path.join(out_dir, "rt_before_after.png")
-    stack_out = os.path.join(out_dir, "stack_optimised.txt")
+    stack_best = os.path.join(out_dir, "stack_best.txt")
+    loss_path = os.path.join(out_dir, "loss_history.csv")
 
-    # CSV with before/after columns (same schema as optimize_film).
+    # CSV with before/after columns (after = best-loss stack).
     with open(csv_path, "w", encoding="utf-8") as fh:
         fh.write("wavelength_nm,R_before,T_before,R_after,T_after\n")
         for wl, rb, tb, ra, ta in zip(plot_wls, R0, T0, R1, T1):
@@ -397,20 +424,48 @@ def run(stack_path: str, cfg_path: str) -> int:
         materials_to_show=[],
     )
     plot_rt(
-        os.path.join(out_dir, "rt_after.png"),
+        os.path.join(out_dir, "rt_best.png"),
         plot_wls,
         R1,
         T1,
         bands=[b.as_band_spec() for b in rbands],
-        title=f"{os.path.basename(stack_path)} after {method.upper()}",
+        title=(
+            f"{os.path.basename(stack_path)} best loss "
+            f"({method.upper()} iter {best_iter})"
+        ),
     )
-    write_stack_txt(stack_out, incident, layers1, substrate, nk)
+    write_stack_txt(
+        stack_best,
+        incident,
+        layers_best,
+        substrate,
+        nk,
+        header_lines=[
+            f"# best-loss stack  method={method}  "
+            f"loss={best_cost:.12e}  best_iter={best_iter}  "
+            f"n_iter={result.n_iter}",
+        ],
+    )
+    # Alias for callers expecting the previous filename.
+    write_stack_txt(
+        os.path.join(out_dir, "stack_optimised.txt"),
+        incident,
+        layers_best,
+        substrate,
+        nk,
+        header_lines=[
+            f"# best-loss stack (same as stack_best.txt)  "
+            f"loss={best_cost:.12e}  best_iter={best_iter}",
+        ],
+    )
+    write_loss_history(loss_path, result.history, best_iter)
     write_spectrum_csv(
-        os.path.join(out_dir, "spectrum_after.csv"), plot_wls, R1, T1
+        os.path.join(out_dir, "spectrum_best.csv"), plot_wls, R1, T1
     )
 
     print(f"\n  wrote {csv_path}")
-    print(f"  wrote {stack_out}")
+    print(f"  wrote {stack_best}")
+    print(f"  wrote {loss_path}")
     print(f"  wrote {plot_path}")
     return 0
 

@@ -44,6 +44,8 @@ class OptimResult:
     success: bool
     message: str = ""
     history: list[float] = field(default_factory=list)
+    # Iteration index (0 = start) at which ``cost`` / ``layers`` were best.
+    best_iter: int = 0
 
 
 def _bounds_for(mat: str) -> tuple[float, float]:
@@ -393,8 +395,19 @@ class LMThicknessOptimizer:
                 step *= 0.5
                 if step < 0.5e-9:
                     break
+        best_iter = min(
+            range(len(history)),
+            key=lambda i: history[i],
+        )
         return OptimResult(
-            best, best_cost, self.residuals(best), len(history) - 1, True, "coarse", history
+            best,
+            best_cost,
+            self.residuals(best),
+            len(history) - 1,
+            True,
+            "coarse",
+            history,
+            best_iter=best_iter,
         )
 
     def _cost_gradient(
@@ -457,7 +470,7 @@ class LMThicknessOptimizer:
         r = self.residuals(list(zip(materials, x)))
         cost = 0.5 * sum(v * v for v in r)
         history = [cost]
-        best_x, best_cost, best_r = list(x), cost, r
+        best_x, best_cost, best_r, best_iter = list(x), cost, r, 0
 
         m = [0.0] * len(x)
         v = [0.0] * len(x)
@@ -500,7 +513,7 @@ class LMThicknessOptimizer:
             step_norm = math.sqrt(sum(d * d for d in delta))
 
             if cost < best_cost - 1e-12:
-                best_x, best_cost, best_r = list(x), cost, r
+                best_x, best_cost, best_r, best_iter = list(x), cost, r, it
                 stale = 0
             else:
                 stale += 1
@@ -511,8 +524,8 @@ class LMThicknessOptimizer:
             if verbose and (it == 1 or it % 5 == 0 or it == self.max_iter):
                 print(
                     f"    Adam iter {it:3d}: cost={cost:.6e}  "
-                    f"best={best_cost:.6e}  lr={lr*1e9:.2f} nm  "
-                    f"Σd={sum(x)*1e9:.1f} nm",
+                    f"best={best_cost:.6e}@iter{best_iter}  "
+                    f"lr={lr*1e9:.2f} nm  Σd={sum(best_x)*1e9:.1f} nm",
                     flush=True,
                 )
             if step_norm < 1e-12 or best_cost < self.tol:
@@ -524,6 +537,7 @@ class LMThicknessOptimizer:
                     True,
                     "converged",
                     history,
+                    best_iter=best_iter,
                 )
 
         return OptimResult(
@@ -534,6 +548,7 @@ class LMThicknessOptimizer:
             best_cost < history[0],
             "max_iter",
             history,
+            best_iter=best_iter,
         )
 
     def _optimize_lm(
@@ -551,6 +566,7 @@ class LMThicknessOptimizer:
         r = self.residuals(list(zip(materials, x)))
         cost = 0.5 * sum(v * v for v in r)
         history.append(cost)
+        best_x, best_cost, best_r, best_iter = list(x), cost, r, 0
 
         if verbose:
             print(
@@ -589,35 +605,40 @@ class LMThicknessOptimizer:
                 step_norm = math.sqrt(sum(d * d for d in delta))
                 x, r, cost = x_trial, r_trial, cost_trial
                 history.append(cost)
+                if cost < best_cost - 1e-12:
+                    best_x, best_cost, best_r, best_iter = list(x), cost, r, it
                 lam = max(lam * 0.3, 1e-8)
                 if verbose and (it == 1 or it % 5 == 0 or it == self.max_iter):
-                    total_nm = sum(x) * 1e9
+                    total_nm = sum(best_x) * 1e9
                     print(
                         f"    LM iter {it:3d}: cost={cost:.6e}  "
+                        f"best={best_cost:.6e}@iter{best_iter}  "
                         f"λ={lam:.2e}  Σd={total_nm:.1f} nm",
                         flush=True,
                     )
-                if step_norm < 1e-12 or cost < self.tol:
+                if step_norm < 1e-12 or best_cost < self.tol:
                     return OptimResult(
-                        list(zip(materials, x)),
-                        cost,
-                        r,
+                        list(zip(materials, best_x)),
+                        best_cost,
+                        best_r,
                         it,
                         True,
                         "converged",
                         history,
+                        best_iter=best_iter,
                     )
             else:
                 lam = min(lam * 3.0, 1e8)
 
         return OptimResult(
-            list(zip(materials, x)),
-            cost,
-            r,
+            list(zip(materials, best_x)),
+            best_cost,
+            best_r,
             self.max_iter,
-            cost < history[0],
+            best_cost < history[0],
             "max_iter",
             history,
+            best_iter=best_iter,
         )
 
     def evaluate(self, layers: Sequence[tuple[str, float]]):
