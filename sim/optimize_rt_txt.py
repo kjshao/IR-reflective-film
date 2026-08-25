@@ -1,7 +1,8 @@
 """Thickness-only Adam/LM optimiser for a plain-text constant-n,k stack.
 
-Initial stack format matches ``plot_rt_txt.py``. Optimises layer thicknesses
-to jointly push reflectance up or down over N user-specified wavelength bands.
+Initial stack format matches ``plot_rt_txt.py``. Optimises **coating** layer
+thicknesses only; the first row (incident medium) and last row (substrate)
+are never free variables — their thicknesses stay exactly as in the input.
 
 Usage::
 
@@ -241,25 +242,28 @@ def write_stack_txt(
     substrate: StackRow,
     nk: dict[str, complex],
     *,
+    film_indices: Sequence[int] | None = None,
     header_lines: list[str] | None = None,
 ) -> None:
+    """Write stack text; incident/substrate thicknesses kept from input rows."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     lines: list[str] = []
     if header_lines:
         lines.extend(header_lines)
     lines.append("# index  material  thickness_nm  n  k")
     lines.append(
-        f"0  {incident.material}  0  {nk[incident.material.lower()].real:.6g}  "
+        f"{incident.index}  {incident.material}  {incident.thickness_nm:.6g}  "
+        f"{nk[incident.material.lower()].real:.6g}  "
         f"{nk[incident.material.lower()].imag:.6g}"
     )
-    for i, (mat, d) in enumerate(films, 1):
+    for i, (mat, d) in enumerate(films):
+        idx = film_indices[i] if film_indices is not None else i + 1
         N = nk[mat.lower()]
         lines.append(
-            f"{i}  {mat}  {d / _NM:.4f}  {N.real:.6g}  {N.imag:.6g}"
+            f"{idx}  {mat}  {d / _NM:.4f}  {N.real:.6g}  {N.imag:.6g}"
         )
-    last = len(films) + 1
     lines.append(
-        f"{last}  {substrate.material}  0  "
+        f"{substrate.index}  {substrate.material}  {substrate.thickness_nm:.6g}  "
         f"{nk[substrate.material.lower()].real:.6g}  "
         f"{nk[substrate.material.lower()].imag:.6g}"
     )
@@ -310,7 +314,10 @@ def run(stack_path: str, cfg_path: str) -> int:
 
     incident, film_rows, substrate = load_stack_txt(stack_path)
     nk = nk_table(incident, film_rows, substrate)
+    # Only coating layers are free; incident + substrate stay fixed.
     layers0 = [(r.material, r.thickness_m) for r in film_rows]
+    film_indices = [r.index for r in film_rows]
+    free_indices = list(range(len(layers0)))
     rbands = parse_r_bands(cfg)
 
     method = str(cfg.get("method", "adam")).lower()
@@ -352,6 +359,18 @@ def run(stack_path: str, cfg_path: str) -> int:
     print(f"  stack: {stack_path}")
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
+    print(
+        f"  fixed incident: {incident.material}  "
+        f"d={incident.thickness_nm:g} nm  n={incident.n:g}  k={incident.k:g}"
+    )
+    print(
+        f"  fixed substrate: {substrate.material}  "
+        f"d={substrate.thickness_nm:g} nm  n={substrate.n:g}  k={substrate.k:g}"
+    )
+    print(
+        f"  free coating layers: {len(layers0)}  "
+        f"(incident/substrate thicknesses not optimised)"
+    )
     print(f"  n_bands: {len(rbands)}")
     for b in rbands:
         goal = "maximize" if b.maximize else "minimize"
@@ -374,7 +393,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     )
     print_band_report("Before", layers0, rbands, opt.wavelengths, opt._rt(layers0)[0])
 
-    result = opt.optimize(layers0, verbose=True)
+    result = opt.optimize(layers0, free_indices=free_indices, verbose=True)
     # Always keep the iterate with the lowest loss seen during optimisation.
     layers_best = result.layers
     best_cost = result.cost
@@ -440,10 +459,12 @@ def run(stack_path: str, cfg_path: str) -> int:
         layers_best,
         substrate,
         nk,
+        film_indices=film_indices,
         header_lines=[
             f"# best-loss stack  method={method}  "
             f"loss={best_cost:.12e}  best_iter={best_iter}  "
             f"n_iter={result.n_iter}",
+            "# incident and substrate thicknesses fixed (not optimised)",
         ],
     )
     # Alias for callers expecting the previous filename.
@@ -453,9 +474,11 @@ def run(stack_path: str, cfg_path: str) -> int:
         layers_best,
         substrate,
         nk,
+        film_indices=film_indices,
         header_lines=[
             f"# best-loss stack (same as stack_best.txt)  "
             f"loss={best_cost:.12e}  best_iter={best_iter}",
+            "# incident and substrate thicknesses fixed (not optimised)",
         ],
     )
     write_loss_history(loss_path, result.history, best_iter)
