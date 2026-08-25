@@ -1,0 +1,36 @@
+{
+  "comment": "3-band joint R optimisation on a constant-n,k text stack (Adam or LM only).",
+  "n_bands": 3,
+  "method": "adam",
+  "bands": [
+    {
+      "wavelength_nm": [420, 700],
+      "objective": "minimize",
+      "weight": 2.0
+    },
+    {
+      "wavelength_nm": [800, 1200],
+      "objective": "maximize",
+      "weight": 1.5
+    },
+    {
+      "wavelength_nm": [1400, 1800],
+      "objective": "maximize",
+      "weight": 1.0
+    }
+  ],
+  "wavelength_step_nm": 15,
+  "max_iter": 40,
+  "thickness_weight": 0.01,
+  "fd_step_nm": 0.5,
+  "adam_lr_nm": 2.0,
+  "adam_beta1": 0.9,
+  "adam_beta2": 0.999,
+  "adam_eps": 1e-8,
+  "adam_max_step_nm": 10.0,
+  "incident_angle_deg": 0,
+  "polarization": "unpolarized",
+  "plot_wavelength_nm": [400, 1800],
+  "plot_step_nm": 5,
+  "output_dir": "../out/optimize_rt_txt_example"
+}
