@@ -47,6 +47,31 @@ def band_bg_color(index: int) -> str:
     return BAND_BG_COLORS[index % len(BAND_BG_COLORS)]
 
 
+def shade_bands(ax, bands: list[BandSpec]) -> None:
+    """Pastel fills for each band plus dashed vertical lines at band edges."""
+    for i, b in enumerate(bands):
+        ax.axvspan(
+            b.wl_lo * 1e9,
+            b.wl_hi * 1e9,
+            color=band_bg_color(i),
+            alpha=0.45,
+            lw=0,
+            zorder=0,
+        )
+    edges_nm = sorted(
+        {b.wl_lo * 1e9 for b in bands} | {b.wl_hi * 1e9 for b in bands}
+    )
+    for x in edges_nm:
+        ax.axvline(
+            x,
+            color="0.35",
+            linestyle="--",
+            lw=0.9,
+            alpha=0.75,
+            zorder=1,
+        )
+
+
 def _nm(x: float) -> float:
     return x * 1e-9
 
@@ -207,15 +232,8 @@ def plot_results(
     ax.plot(wl_nm, [100 * r for r in R_after], "-", color="C0", label="R after")
     ax.plot(wl_nm, [100 * t for t in T_before], "--", color="C1", label="T before")
     ax.plot(wl_nm, [100 * t for t in T_after], "-", color="C1", label="T after")
-    for i, b in enumerate(bands):
-        ax.axvspan(
-            b.wl_lo * 1e9,
-            b.wl_hi * 1e9,
-            color=band_bg_color(i),
-            alpha=0.45,
-            lw=0,
-            zorder=0,
-        )
+    shade_bands(ax, bands)
+    for b in bands:
         if b.R_min is not None:
             ax.hlines(
                 100 * b.R_min,
@@ -261,15 +279,7 @@ def plot_results(
     ax = axes[1]
     ax.plot(wl_nm, [100 * r for r in R_before], "--", label="R before")
     ax.plot(wl_nm, [100 * r for r in R_after], "-", label="R after")
-    for i, b in enumerate(bands):
-        ax.axvspan(
-            b.wl_lo * 1e9,
-            b.wl_hi * 1e9,
-            color=band_bg_color(i),
-            alpha=0.45,
-            lw=0,
-            zorder=0,
-        )
+    shade_bands(ax, bands)
     ax.set_ylabel("R (%)")
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.3)
