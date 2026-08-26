@@ -111,8 +111,9 @@ sim/
 - **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.json`，并追加 `best_updates.csv`。全局 DE/DA 仍按每次 NEW best 写入；局部 LM/Adam 按 `checkpoint_local_every` 节流（默认全网格每 5 iter、mini-batch 每 1 epoch），结束时若有未写出的 best 会补写。  
 - **`layers` 与 `seed`**：有 `layers` 则用给定膜系；否则可用 `seed` 生成啁啾 1/4 波长堆；都没有则用简单单周期种子。  
 - **`bands`**：每段可设 `R_min` / `R_max` / `T_min` / `T_max`，以及可选的连续目标 `R_target` / `T_target`。  
+- **`rt_engine`**：`tmm`（默认 CPU）、`tmm_cuda`（CuPy 波长批量 TMM，需 NVIDIA GPU）、或 `external`。也可用顶层 `"use_cuda": true`。  
+- **`use_cuda`**：`true` 时走 GPU 批量相干 TMM（仅 `semi_infinite`；`incoherent_slab` 回退 CPU）。macOS 无 CUDA，请保持 `false`。  
 - **`substrate_model`**：`semi_infinite`（镀膜设计默认，忽略厚基底背面）或 `incoherent_slab`（含非相干基底双面）。含背面时，可见光 R≤2% 往往物理上很难达到。  
-- **`rt_engine`**：`tmm` 或 `external`；外部时需设 `external_command`，且命令字符串含 `{input}`、`{output}`。
 
 ## 示例指标
 
@@ -153,6 +154,7 @@ sim/
 - Python 3.10+（推荐）  
 - `matplotlib`（见 `requirements.txt`）  
 - `scipy`（可选；`method=de` / `dual_annealing` 全局厚度搜索需要）  
+- `cupy`（可选；`use_cuda` / `rt_engine=tmm_cuda`，仅 NVIDIA CUDA；macOS 不可用）  
 - 标准库即可跑 TMM；优化入口需 matplotlib 出图  
 
 既有基线评估仍可无额外依赖：

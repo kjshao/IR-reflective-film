@@ -137,6 +137,56 @@ class TMMCalculator(RTCalculator):
         return rs, ts
 
 
+class CudaTMMCalculator(RTCalculator):
+    """Wavelength-batched coherent TMM on NVIDIA GPU via CuPy.
+
+    Only ``substrate_model='semi_infinite'`` is accelerated. Other models
+    fall back to the CPU ``TMMCalculator`` path.
+    """
+
+    def __init__(self):
+        import tmm_cuda
+
+        tmm_cuda.require_cupy()
+        self._cpu = TMMCalculator()
+
+    def spectrum(
+        self,
+        layers: Sequence[tuple[str, float]],
+        wavelengths: Sequence[float],
+        theta0: float = 0.0,
+        *,
+        incident: str = "air",
+        substrate: str = "glass",
+        substrate_thickness: float = DEFAULT_SUBSTRATE_THICKNESS,
+        exit_medium: str = "air",
+        polarization: str = "unpolarized",
+        substrate_model: str = "semi_infinite",
+    ) -> tuple[list[float], list[float]]:
+        model = (substrate_model or "semi_infinite").lower()
+        if model not in ("semi_infinite", "semi-infinite", "infinite"):
+            return self._cpu.spectrum(
+                layers,
+                wavelengths,
+                theta0,
+                incident=incident,
+                substrate=substrate,
+                substrate_thickness=substrate_thickness,
+                exit_medium=exit_medium,
+                polarization=polarization,
+                substrate_model=substrate_model,
+            )
+        import tmm_cuda
+
+        wls = list(wavelengths)
+        names = [incident, *[m for m, _ in layers], substrate]
+        d_list = [0.0, *[d for _, d in layers], 0.0]
+        n_by_layer = [[_n(name, wl) for wl in wls] for name in names]
+        return tmm_cuda.spectrum_dispersive(
+            n_by_layer, d_list, wls, theta0, polarization
+        )
+
+
 class ExternalRTCalculator(RTCalculator):
     """Call an external program that reads a stack JSON and writes R/T CSV.
 
@@ -225,15 +275,24 @@ def _read_rt_csv(path: str, n_expect: int) -> tuple[list[float], list[float]]:
 def make_calculator(
     engine: str = "tmm",
     external_command: str | None = None,
+    *,
+    use_cuda: bool = False,
 ) -> RTCalculator:
     engine = (engine or "tmm").lower()
+    want_cuda = bool(use_cuda) or engine in ("tmm_cuda", "cuda", "cupy")
+    if want_cuda:
+        if engine in ("external", "ext"):
+            raise ValueError("use_cuda is incompatible with rt_engine=external")
+        return CudaTMMCalculator()
     if engine == "tmm":
         return TMMCalculator()
     if engine in ("external", "ext"):
         if not external_command:
             raise ValueError("rt_engine=external requires external_command")
         return ExternalRTCalculator(external_command)
-    raise ValueError(f"unknown rt_engine {engine!r}; use 'tmm' or 'external'")
+    raise ValueError(
+        f"unknown rt_engine {engine!r}; use 'tmm', 'tmm_cuda', or 'external'"
+    )
 
 
 def material_index(

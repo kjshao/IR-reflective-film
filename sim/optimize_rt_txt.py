@@ -128,8 +128,13 @@ def parse_r_bands(cfg: dict) -> list[RObjectiveBand]:
 class ConstantNkCalculator(RTCalculator):
     """TMM using fixed N=n+ik from the text stack (no dispersion library)."""
 
-    def __init__(self, nk: dict[str, complex]):
+    def __init__(self, nk: dict[str, complex], *, use_cuda: bool = False):
         self.nk = {name.lower(): complex(val) for name, val in nk.items()}
+        self.use_cuda = bool(use_cuda)
+        if self.use_cuda:
+            import tmm_cuda
+
+            tmm_cuda.require_cupy()
 
     def _N(self, name: str) -> complex:
         key = name.lower()
@@ -156,6 +161,14 @@ class ConstantNkCalculator(RTCalculator):
         n_inc = self._N(incident)
         n_sub = self._N(substrate)
         coating = [(self._N(m), d) for m, d in layers]
+        if self.use_cuda:
+            import tmm_cuda
+
+            n_list = [n_inc, *[n for n, _ in coating], n_sub]
+            d_list = [0.0, *[d for _, d in coating], 0.0]
+            return tmm_cuda.spectrum_constant_n(
+                n_list, d_list, wavelengths, theta0, polarization
+            )
         rs, ts = [], []
         for wl in wavelengths:
             stack = [(n_inc, 0.0), *coating, (n_sub, 0.0)]
@@ -627,7 +640,8 @@ def run(stack_path: str, cfg_path: str) -> int:
             os.path.join(os.path.dirname(os.path.abspath(stack_path)), out_dir)
         )
 
-    calc = ConstantNkCalculator(nk)
+    use_cuda = bool(cfg.get("use_cuda", False))
+    calc = ConstantNkCalculator(nk, use_cuda=use_cuda)
     error_power = float(cfg.get("error_power", 2.0))
     smooth_weight = float(cfg.get("smooth_weight", 0.0))
     ripple_weight = float(cfg.get("ripple_weight", 0.0))
@@ -714,6 +728,8 @@ def run(stack_path: str, cfg_path: str) -> int:
     print(f"  stack: {stack_path}")
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
+    if use_cuda:
+        print("  use_cuda: True (CuPy wavelength-batched TMM)")
     if checkpoint_on_best:
         print(f"  checkpoint_on_best: {os.path.join(out_dir, 'stack_best.txt')}")
     if opt.mini_batch:

@@ -402,6 +402,7 @@ def run(cfg: dict, input_path: str) -> int:
     calc = make_calculator(
         cfg.get("rt_engine", "tmm"),
         cfg.get("external_command"),
+        use_cuda=bool(cfg.get("use_cuda", False)),
     )
 
     substrate_model = cfg.get("substrate_model", "semi_infinite")
@@ -467,6 +468,12 @@ def run(cfg: dict, input_path: str) -> int:
     print("IR / optical thin-film optimiser", flush=True)
     print(f"  input: {input_path}", flush=True)
     print(f"  angle: {angle_deg} deg  engine: {cfg.get('rt_engine', 'tmm')}", flush=True)
+    if bool(cfg.get("use_cuda", False)) or str(cfg.get("rt_engine", "")).lower() in (
+        "tmm_cuda",
+        "cuda",
+        "cupy",
+    ):
+        print("  use_cuda: True (CuPy wavelength-batched TMM)", flush=True)
     print(f"  thickness method: {lm_kwargs['method']}", flush=True)
     if checkpoint_on_best:
         print(f"  checkpoint_on_best: {os.path.join(out_dir, 'stack_best.json')}", flush=True)

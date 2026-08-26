@@ -8,6 +8,7 @@
   "exit_medium": "air",
   "substrate_model": "semi_infinite",
   "rt_engine": "tmm",
+  "use_cuda": false,
   "layers": [
     {"material": "tio2", "thickness_nm": 55},
     {"material": "sio2", "thickness_nm": 85},

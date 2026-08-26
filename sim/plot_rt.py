@@ -184,7 +184,11 @@ def run(cfg: dict, input_path: str, bands_cfg: dict | None = None) -> int:
     plot_step = float(cfg.get("plot_step_nm", src.get("plot_step_nm", 5)))
     plot_wls = [x * _NM for x in dense_grid_nm(lo_nm, hi_nm, plot_step)]
 
-    calc = make_calculator(cfg.get("rt_engine", "tmm"), cfg.get("external_command"))
+    calc = make_calculator(
+        cfg.get("rt_engine", "tmm"),
+        cfg.get("external_command"),
+        use_cuda=bool(cfg.get("use_cuda", False)),
+    )
     rt_kw = dict(
         incident=cfg.get("incident_medium", "air"),
         substrate=cfg.get("substrate", "glass"),
