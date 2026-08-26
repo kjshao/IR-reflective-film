@@ -69,6 +69,30 @@ def band_stats(
     return rows
 
 
+def write_band_stats_csv(
+    path: str,
+    wavelengths_m: list[float],
+    R: list[float],
+    T: list[float],
+    bands: list[BandSpec],
+) -> None:
+    """Write per-band R/T mean/min/max table as CSV."""
+    rows = band_stats(wavelengths_m, R, T, bands)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(
+            "band,wl_lo_nm,wl_hi_nm,"
+            "R_mean,R_min,R_max,T_mean,T_min,T_max\n"
+        )
+        for i, row in enumerate(rows, 1):
+            lo, hi = row["wl_nm"]
+            fh.write(
+                f"{i},{lo:.2f},{hi:.2f},"
+                f"{row['R_mean']:.6f},{row['R_min']:.6f},{row['R_max']:.6f},"
+                f"{row['T_mean']:.6f},{row['T_min']:.6f},{row['T_max']:.6f}\n"
+            )
+
+
 def write_spectrum_csv(
     path: str,
     wavelengths_m: list[float],

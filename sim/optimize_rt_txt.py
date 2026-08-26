@@ -513,8 +513,14 @@ def make_txt_best_checkpoint_saver(
     film_indices: list[int],
     method: str,
     enabled: bool = True,
+    plot_rt_live: bool = True,
+    calc=None,
+    plot_wls: list[float] | None = None,
+    bands: list | None = None,
+    theta0: float = 0.0,
+    polarization: str = "unpolarized",
 ):
-    """Live-update ``stack_best.txt`` (+ CSV log) when the running best improves."""
+    """Live-update ``stack_best.txt`` (+ CSV log / RT plot) on best improve."""
     if not enabled:
         return None
 
@@ -525,12 +531,17 @@ def make_txt_best_checkpoint_saver(
     if not os.path.isfile(log_path):
         with open(log_path, "w", encoding="utf-8") as fh:
             fh.write(
-                "update,stage,iter,n_eval,n_improve,cost,total_thickness_nm\n"
+                "update,stage,iter,n_eval,n_improve,cost,delta,thickness_delta_nm,"
+                "total_thickness_nm\n"
             )
 
     def on_best(layers, cost, info) -> None:
+        from plot_rt import plot_rt, write_band_stats_csv, write_spectrum_csv
+
         state["n"] += 1
         total_nm = sum(d for _, d in layers) / _NM
+        delta = float(info.get("delta", 0.0) or 0.0)
+        d_rms = float(info.get("thickness_delta_nm", 0.0) or 0.0)
         write_stack_txt(
             stack_live,
             incident,
@@ -541,9 +552,10 @@ def make_txt_best_checkpoint_saver(
             header_lines=[
                 f"# live best  method={method}  update=#{state['n']}  "
                 f"stage={info.get('stage', '')}  "
-                f"mse={float(cost):.12e}  "
+                f"mse={float(cost):.12e}  Δ={delta:+.6e}  "
+                f"d_rms={d_rms:.3f} nm  "
                 f"iter={info.get('iter', 0)}  n_eval={info.get('n_eval', 0)}",
-                "# rewritten whenever the running best improves",
+                "# rewritten whenever the running best improves (cost + Δ)",
             ],
         )
         with open(log_path, "a", encoding="utf-8") as fh:
@@ -554,11 +566,49 @@ def make_txt_best_checkpoint_saver(
                 f"{info.get('n_eval', 0)},"
                 f"{info.get('n_improve', 0)},"
                 f"{float(cost):.12e},"
+                f"{delta:.12e},"
+                f"{d_rms:.6f},"
                 f"{total_nm:.4f}\n"
+            )
+        if (
+            plot_rt_live
+            and calc is not None
+            and plot_wls
+            and bands is not None
+        ):
+            R, T = calc.spectrum(
+                layers,
+                plot_wls,
+                theta0,
+                incident=incident.material,
+                substrate=substrate.material,
+                polarization=polarization,
+            )
+            plot_rt(
+                os.path.join(out_dir, "rt_best.png"),
+                plot_wls,
+                R,
+                T,
+                bands=bands,
+                title=(
+                    f"live best  mse={float(cost):.4e}  "
+                    f"Δ={delta:+.3e}  #{state['n']}"
+                ),
+            )
+            write_spectrum_csv(
+                os.path.join(out_dir, "spectrum_best.csv"), plot_wls, R, T
+            )
+            write_band_stats_csv(
+                os.path.join(out_dir, "band_stats_best.csv"),
+                plot_wls,
+                R,
+                T,
+                bands,
             )
         print(
             f"    checkpoint: updated {stack_live}  "
-            f"cost={float(cost):.6e}  stage={info.get('stage', '')}  "
+            f"cost={float(cost):.6e}  Δ={delta:+.3e}  "
+            f"d_rms={d_rms:.2f} nm  stage={info.get('stage', '')}  "
             f"update=#{state['n']}",
             flush=True,
         )
@@ -710,19 +760,12 @@ def run(stack_path: str, cfg_path: str) -> int:
         da_visit=float(cfg.get("da_visit", 2.62)),
         da_accept=float(cfg.get("da_accept", -5.0)),
         checkpoint_local_every=cfg.get("checkpoint_local_every"),
+        checkpoint_delta_weight=float(cfg.get("checkpoint_delta_weight", 0.0)),
     )
 
     os.makedirs(out_dir, exist_ok=True)
     checkpoint_on_best = bool(cfg.get("checkpoint_on_best", True))
-    opt.on_best = make_txt_best_checkpoint_saver(
-        out_dir,
-        incident=incident,
-        substrate=substrate,
-        nk=nk,
-        film_indices=film_indices,
-        method=method,
-        enabled=checkpoint_on_best,
-    )
+    checkpoint_plot_rt = bool(cfg.get("checkpoint_plot_rt", True))
 
     print("Text-stack R-target MSE thickness optimiser")
     print(f"  stack: {stack_path}")
@@ -730,6 +773,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
     if use_cuda:
         print("  use_cuda: True (CuPy wavelength-batched TMM)")
+    print(f"  checkpoint_delta_weight: {opt.checkpoint_delta_weight:g}")
     if checkpoint_on_best:
         print(f"  checkpoint_on_best: {os.path.join(out_dir, 'stack_best.txt')}")
     if opt.mini_batch:
@@ -768,6 +812,23 @@ def run(stack_path: str, cfg_path: str) -> int:
     plot_lo, plot_hi = cfg.get("plot_wavelength_nm", [400, 1800])
     plot_step = float(cfg.get("plot_step_nm", 5))
     plot_wls = [x * _NM for x in dense_grid_nm(float(plot_lo), float(plot_hi), plot_step)]
+    plot_bands = [b.as_band_spec() for b in rbands]
+
+    opt.on_best = make_txt_best_checkpoint_saver(
+        out_dir,
+        incident=incident,
+        substrate=substrate,
+        nk=nk,
+        film_indices=film_indices,
+        method=method,
+        enabled=checkpoint_on_best,
+        plot_rt_live=checkpoint_plot_rt,
+        calc=calc,
+        plot_wls=plot_wls,
+        bands=plot_bands,
+        theta0=theta0,
+        polarization=pol,
+    )
 
     R0, T0 = calc.spectrum(
         layers0,
@@ -780,12 +841,28 @@ def run(stack_path: str, cfg_path: str) -> int:
     print_band_report("Before", layers0, rbands, opt.wavelengths, opt._rt(layers0)[0])
 
     result = opt.optimize(layers0, free_indices=free_indices, verbose=True)
-    # Always keep the iterate with the lowest MSE seen during optimisation.
+    # Selected optimal: cost + thickness-Δ ranking.
     layers_best = result.layers
     best_cost = result.cost
     best_iter = result.best_iter
+    start_cost = result.start_cost if result.start_cost is not None else result.history[0]
+    best_delta = best_cost - start_cost
+    layers_final = result.final_layers if result.final_layers is not None else layers_best
+    final_cost = (
+        result.final_cost if result.final_cost is not None else best_cost
+    )
+    final_delta = final_cost - start_cost
+
     R1, T1 = calc.spectrum(
         layers_best,
+        plot_wls,
+        theta0,
+        incident=incident.material,
+        substrate=substrate.material,
+        polarization=pol,
+    )
+    Rf, Tf = calc.spectrum(
+        layers_final,
         plot_wls,
         theta0,
         incident=incident.material,
@@ -803,23 +880,33 @@ def run(stack_path: str, cfg_path: str) -> int:
         )
         print(f"  global MSE={g.cost:.6e}", flush=True)
     print_band_report(
-        f"Best MSE ({'epoch' if opt.mini_batch else 'iter'} {best_iter})",
+        f"Best (cost+Δ, {'epoch' if opt.mini_batch else 'iter'} {best_iter})",
         layers_best,
         rbands,
         opt.wavelengths,
         opt._rt(layers_best)[0],
     )
     print(
-        f"\n  best MSE={best_cost:.6e} at "
+        f"\n  best MSE={best_cost:.6e}  Δ={best_delta:+.3e} at "
         f"{'epoch' if opt.mini_batch else 'iter'} {best_iter}  "
         f"(ran {result.n_iter} "
         f"{'epochs' if opt.mini_batch else 'iters'}, {result.message})"
     )
+    if layers_final is not layers_best:
+        print_band_report(
+            "Final iterate",
+            layers_final,
+            rbands,
+            opt.wavelengths,
+            opt._rt(layers_final)[0],
+        )
+        print(f"  final MSE={final_cost:.6e}  Δ={final_delta:+.3e}", flush=True)
 
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, "spectrum_before_after.csv")
     plot_path = os.path.join(out_dir, "rt_before_after.png")
     stack_best = os.path.join(out_dir, "stack_best.txt")
+    stack_final = os.path.join(out_dir, "stack_final.txt")
     loss_path = os.path.join(out_dir, "loss_history.csv")
 
     # CSV with before/after columns (after = best-loss stack).
@@ -837,18 +924,32 @@ def run(stack_path: str, cfg_path: str) -> int:
         T0,
         R1,
         T1,
-        [b.as_band_spec() for b in rbands],
+        plot_bands,
         materials_to_show=[],
     )
+    from plot_rt import write_band_stats_csv
+
     plot_rt(
         os.path.join(out_dir, "rt_best.png"),
         plot_wls,
         R1,
         T1,
-        bands=[b.as_band_spec() for b in rbands],
+        bands=plot_bands,
         title=(
-            f"{os.path.basename(stack_path)} best MSE "
-            f"({method.upper()} iter {best_iter})"
+            f"{os.path.basename(stack_path)} best "
+            f"({method.upper()} iter {best_iter}, "
+            f"mse={best_cost:.4e}, Δ={best_delta:+.3e})"
+        ),
+    )
+    plot_rt(
+        os.path.join(out_dir, "rt_final.png"),
+        plot_wls,
+        Rf,
+        Tf,
+        bands=plot_bands,
+        title=(
+            f"{os.path.basename(stack_path)} final "
+            f"({method.upper()}, mse={final_cost:.4e}, Δ={final_delta:+.3e})"
         ),
     )
     write_stack_txt(
@@ -859,11 +960,26 @@ def run(stack_path: str, cfg_path: str) -> int:
         nk,
         film_indices=film_indices,
         header_lines=[
-            f"# best-MSE stack  method={method}  "
-            f"mse={best_cost:.12e}  best_iter={best_iter}  "
+            f"# best stack (cost+Δ)  method={method}  "
+            f"mse={best_cost:.12e}  Δ={best_delta:+.6e}  "
+            f"best_iter={best_iter}  "
             f"n_iter={result.n_iter}  msg={result.message}",
             "# incident and substrate thicknesses fixed (not optimised)",
             "# R_target: minimize bands → 0, maximize bands → 1",
+        ],
+    )
+    write_stack_txt(
+        stack_final,
+        incident,
+        layers_final,
+        substrate,
+        nk,
+        film_indices=film_indices,
+        header_lines=[
+            f"# final iterate  method={method}  "
+            f"mse={final_cost:.12e}  Δ={final_delta:+.6e}  "
+            f"n_iter={result.n_iter}  msg={result.message}",
+            "# last iterate (may differ from stack_best.txt)",
         ],
     )
     # Alias for callers expecting the previous filename.
@@ -875,7 +991,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         nk,
         film_indices=film_indices,
         header_lines=[
-            f"# best-MSE stack (same as stack_best.txt)  "
+            f"# best stack (same as stack_best.txt)  "
             f"mse={best_cost:.12e}  best_iter={best_iter}",
             "# incident and substrate thicknesses fixed (not optimised)",
         ],
@@ -938,11 +1054,33 @@ def run(stack_path: str, cfg_path: str) -> int:
     write_spectrum_csv(
         os.path.join(out_dir, "spectrum_best.csv"), plot_wls, R1, T1
     )
+    write_spectrum_csv(
+        os.path.join(out_dir, "spectrum_final.csv"), plot_wls, Rf, Tf
+    )
+    write_band_stats_csv(
+        os.path.join(out_dir, "band_stats_best.csv"),
+        plot_wls,
+        R1,
+        T1,
+        plot_bands,
+    )
+    write_band_stats_csv(
+        os.path.join(out_dir, "band_stats_final.csv"),
+        plot_wls,
+        Rf,
+        Tf,
+        plot_bands,
+    )
 
     print(f"\n  wrote {csv_path}")
     print(f"  wrote {stack_best}")
+    print(f"  wrote {stack_final}")
     print(f"  wrote {loss_path}")
     print(f"  wrote {plot_path}")
+    print(f"  wrote {os.path.join(out_dir, 'rt_best.png')}")
+    print(f"  wrote {os.path.join(out_dir, 'rt_final.png')}")
+    print(f"  wrote {os.path.join(out_dir, 'band_stats_best.csv')}")
+    print(f"  wrote {os.path.join(out_dir, 'band_stats_final.csv')}")
     return 0
 
 

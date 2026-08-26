@@ -36,6 +36,60 @@ class BandSpec:
     T_target: float | None = None
 
 
+def thickness_rms_nm(x: Sequence[float], x0: Sequence[float]) -> float:
+    """RMS thickness change from ``x0`` to ``x``, in nanometres."""
+    n = min(len(x), len(x0))
+    if n <= 0:
+        return 0.0
+    acc = 0.0
+    for i in range(n):
+        d = (float(x[i]) - float(x0[i])) * 1e9
+        acc += d * d
+    return math.sqrt(acc / n)
+
+
+def checkpoint_score(
+    cost: float,
+    x: Sequence[float],
+    x0: Sequence[float],
+    *,
+    delta_weight: float = 0.0,
+) -> float:
+    """Lower is better. Balances absolute cost with thickness Δ from start.
+
+    ``score = cost + delta_weight * (rms_nm / 100)``.
+    With ``delta_weight == 0``, near-ties on cost still prefer smaller RMS Δ
+    via :func:`is_better_checkpoint`.
+    """
+    return float(cost) + float(delta_weight) * (thickness_rms_nm(x, x0) / 100.0)
+
+
+def is_better_checkpoint(
+    cand_cost: float,
+    cand_x: Sequence[float],
+    best_cost: float,
+    best_x: Sequence[float],
+    x0: Sequence[float],
+    *,
+    delta_weight: float = 0.0,
+    cost_rel_tol: float = 1e-6,
+) -> bool:
+    """Whether ``cand`` should replace the running best (cost + thickness Δ)."""
+    if delta_weight > 0.0:
+        return (
+            checkpoint_score(cand_cost, cand_x, x0, delta_weight=delta_weight)
+            < checkpoint_score(best_cost, best_x, x0, delta_weight=delta_weight)
+            - 1e-15
+        )
+    # Pure cost, with near-tie broken by smaller thickness change from start.
+    if cand_cost < best_cost - 1e-12:
+        return True
+    tol = max(1e-12, abs(best_cost) * cost_rel_tol)
+    if abs(cand_cost - best_cost) <= tol:
+        return thickness_rms_nm(cand_x, x0) + 1e-15 < thickness_rms_nm(best_x, x0)
+    return False
+
+
 @dataclass
 class OptimResult:
     layers: list[tuple[str, float]]
@@ -49,6 +103,10 @@ class OptimResult:
     best_iter: int = 0
     # For DE/DA + local polish: the global-stage result before LM/Adam.
     pre_polish: OptimResult | None = None
+    # Last iterate (may differ from best ``layers`` / ``cost``).
+    final_layers: list[tuple[str, float]] | None = None
+    final_cost: float | None = None
+    start_cost: float | None = None
 
 
 def resolve_global_polish_method(
@@ -336,6 +394,9 @@ class LMThicknessOptimizer:
         # Local (LM/Adam) best checkpoints: every N iters, or every N epochs
         # for mini-batch Adam. Default: 5 (iters) / 1 (epochs if mini-batch).
         checkpoint_local_every: int | None = None,
+        # Weight on RMS thickness change (nm/100) when ranking checkpoints.
+        # 0 = minimize cost; near-ties prefer smaller thickness Δ from start.
+        checkpoint_delta_weight: float = 0.0,
     ):
         self.calc = calculator
         self.bands = list(bands)
@@ -388,9 +449,37 @@ class LMThicknessOptimizer:
             self.checkpoint_local_every = 1 if self.mini_batch else 5
         else:
             self.checkpoint_local_every = max(1, int(checkpoint_local_every))
+        self.checkpoint_delta_weight = float(checkpoint_delta_weight)
         # Optional: on_best(layers, cost, info_dict) when the running best improves.
         self.on_best: Callable[..., None] | None = None
         self._last_notified_cost: float | None = None
+        self._run_start_cost: float | None = None
+        self._run_start_x: list[float] | None = None
+
+    def _begin_run(self, x0: Sequence[float], start_cost: float) -> None:
+        """Remember run start for Δcost / thickness-Δ checkpoint ranking."""
+        self._run_start_cost = float(start_cost)
+        self._run_start_x = [float(v) for v in x0]
+
+    def _accept_best(
+        self,
+        cand_x: Sequence[float],
+        cand_cost: float,
+        best_x: Sequence[float],
+        best_cost: float,
+        x0: Sequence[float] | None = None,
+    ) -> bool:
+        ref = x0 if x0 is not None else self._run_start_x
+        if ref is None:
+            ref = cand_x
+        return is_better_checkpoint(
+            cand_cost,
+            cand_x,
+            best_cost,
+            best_x,
+            ref,
+            delta_weight=self.checkpoint_delta_weight,
+        )
 
     def _notify_best(
         self,
@@ -414,6 +503,12 @@ class LMThicknessOptimizer:
         ):
             return
         self._last_notified_cost = float(cost)
+        start_cost = self._run_start_cost
+        delta = (
+            float(cost) - float(start_cost) if start_cost is not None else 0.0
+        )
+        x = [float(d) for _, d in layers]
+        x0 = self._run_start_x if self._run_start_x is not None else x
         cb(
             [(m, float(d)) for m, d in layers],
             float(cost),
@@ -422,7 +517,41 @@ class LMThicknessOptimizer:
                 "iter": int(iter),
                 "n_eval": int(n_eval),
                 "n_improve": int(n_improve),
+                "start_cost": start_cost,
+                "delta": delta,
+                "thickness_delta_nm": thickness_rms_nm(x, x0),
             },
+        )
+
+    def _make_result(
+        self,
+        *,
+        best_layers: Sequence[tuple[str, float]],
+        best_cost: float,
+        best_r: Sequence[float],
+        n_iter: int,
+        success: bool,
+        message: str,
+        history: list[float],
+        best_iter: int,
+        final_layers: Sequence[tuple[str, float]],
+        final_cost: float,
+        start_cost: float,
+        pre_polish: OptimResult | None = None,
+    ) -> OptimResult:
+        return OptimResult(
+            [(m, float(d)) for m, d in best_layers],
+            float(best_cost),
+            list(best_r),
+            int(n_iter),
+            bool(success),
+            message,
+            list(history),
+            best_iter=int(best_iter),
+            pre_polish=pre_polish,
+            final_layers=[(m, float(d)) for m, d in final_layers],
+            final_cost=float(final_cost),
+            start_cost=float(start_cost),
         )
 
     def _local_checkpoint_due(self, step: int, *, final: bool = False) -> bool:
@@ -692,6 +821,7 @@ class LMThicknessOptimizer:
             "n_improve": 0,
         }
         progress = {"last_heartbeat": 0}
+        self._begin_run(x0_full, start_cost)
         self._notify_best(
             start_layers,
             start_cost,
@@ -712,7 +842,7 @@ class LMThicknessOptimizer:
             layers_now = list(zip(materials, x))
             c = self.cost(layers_now)
             best["n_eval"] += 1
-            if c < best["cost"] - 1e-15:
+            if self._accept_best(x, c, best["x"], best["cost"]):
                 best["cost"] = c
                 best["x"] = list(x)
                 best["n_improve"] += 1
@@ -722,6 +852,7 @@ class LMThicknessOptimizer:
                         f"    {tag} eval {best['n_eval']:5d}: "
                         f"NEW best={c:.6e}  "
                         f"Δ={c - start_cost:+.3e}  "
+                        f"d_rms={thickness_rms_nm(x, x0_full):.2f} nm  "
                         f"Σd={_sum_nm(x):.1f} nm  "
                         f"improves={best['n_improve']}",
                         flush=True,
@@ -765,25 +896,42 @@ class LMThicknessOptimizer:
         history: list[float],
         verbose: bool,
         label: str,
+        final_layers: Sequence[tuple[str, float]] | None = None,
+        final_cost: float | None = None,
+        start_cost: float | None = None,
     ) -> OptimResult:
         """Attach optional LM/Adam polish after a global (DE/DA) search."""
         cost = self.cost(layers)
         best_iter = (
             min(range(len(history)), key=lambda i: history[i]) if history else 0
         )
-        global_result = OptimResult(
-            list(layers),
-            cost,
-            self.residuals(layers),
-            max(0, len(history) - 1),
-            True,
-            label,
-            list(history),
+        sc = float(start_cost if start_cost is not None else history[0])
+        fl = (
+            [(m, float(d)) for m, d in final_layers]
+            if final_layers is not None
+            else [(m, float(d)) for m, d in layers]
+        )
+        fc = float(final_cost if final_cost is not None else cost)
+        global_result = self._make_result(
+            best_layers=layers,
+            best_cost=cost,
+            best_r=self.residuals(layers),
+            n_iter=max(0, len(history) - 1),
+            success=True,
+            message=label,
+            history=list(history),
             best_iter=best_iter,
+            final_layers=fl,
+            final_cost=fc,
+            start_cost=sc,
         )
         polish = self.global_polish_method
         if polish == "none":
             return global_result
+
+        # Preserve global-run start for cost+Δ ranking across polish.
+        saved_start_x = list(self._run_start_x or [d for _, d in layers])
+        saved_start_cost = self._run_start_cost
 
         if verbose:
             print(
@@ -807,25 +955,55 @@ class LMThicknessOptimizer:
         else:
             raise ValueError(f"internal: bad polish method {polish!r}")
 
+        self._run_start_x = saved_start_x
+        self._run_start_cost = saved_start_cost
+
         merged = list(history) + list(polished.history[1:])
-        merged_best_iter = min(range(len(merged)), key=lambda i: merged[i])
+        best_layers = list(polished.layers)
+        best_cost = float(polished.cost)
+        best_r = list(polished.residuals)
+        merged_best_iter = (
+            min(range(len(merged)), key=lambda i: merged[i]) if merged else 0
+        )
+        if self._accept_best(
+            [d for _, d in global_result.layers],
+            global_result.cost,
+            [d for _, d in best_layers],
+            best_cost,
+            x0=saved_start_x,
+        ):
+            # Global stage wins on cost+Δ ranking.
+            best_layers = list(global_result.layers)
+            best_cost = float(global_result.cost)
+            best_r = list(global_result.residuals)
+        # Prefer polished final as the run's final iterate.
+        pol_final_layers = polished.final_layers or polished.layers
+        pol_final_cost = (
+            polished.final_cost
+            if polished.final_cost is not None
+            else polished.cost
+        )
         if verbose:
             print(
                 f"    {label}+{polish}: "
                 f"global_cost={global_result.cost:.6e} → "
                 f"polished_cost={polished.cost:.6e}  "
-                f"Δ={polished.cost - global_result.cost:+.3e}",
+                f"Δ={polished.cost - global_result.cost:+.3e}  "
+                f"selected_cost={best_cost:.6e}",
                 flush=True,
             )
-        return OptimResult(
-            polished.layers,
-            polished.cost,
-            polished.residuals,
-            polished.n_iter + max(0, len(history) - 1),
-            polished.success,
-            f"{label}+{polish}",
-            merged,
+        return self._make_result(
+            best_layers=best_layers,
+            best_cost=best_cost,
+            best_r=best_r,
+            n_iter=polished.n_iter + max(0, len(history) - 1),
+            success=polished.success,
+            message=f"{label}+{polish}",
+            history=merged,
             best_iter=merged_best_iter,
+            final_layers=pol_final_layers,
+            final_cost=pol_final_cost,
+            start_cost=sc,
             pre_polish=global_result,
         )
 
@@ -920,22 +1098,27 @@ class LMThicknessOptimizer:
         for k, j in enumerate(free):
             x[j] = float(result.x[k])
         x = self._project(materials, x)
-        result_cost = self.cost(list(zip(materials, x)))
+        layers_final = list(zip(materials, x))
+        result_cost = self.cost(layers_final)
         # Prefer the best point seen during search (polish can move off it).
         if best["cost"] <= result_cost + 1e-15:
-            x = list(best["x"])
-        layers_best = list(zip(materials, x))
-        final_cost = self.cost(layers_best)
-        if abs(final_cost - history[-1]) > 1e-15:
-            history.append(final_cost)
+            x_best = list(best["x"])
+        else:
+            x_best = list(x)
+            best["cost"] = result_cost
+        layers_best = list(zip(materials, x_best))
+        final_cost = result_cost
+        best_cost = self.cost(layers_best)
+        if abs(best_cost - history[-1]) > 1e-15:
+            history.append(best_cost)
         if verbose:
-            free_nm = [round(x[j] * 1e9, 2) for j in free]
+            free_nm = [round(x_best[j] * 1e9, 2) for j in free]
             print(
-                f"    DE done: cost={final_cost:.6e}  "
-                f"Δ={final_cost - start_cost:+.3e}  "
+                f"    DE done: best={best_cost:.6e}  final={final_cost:.6e}  "
+                f"Δ={best_cost - start_cost:+.3e}  "
                 f"success={bool(result.success)}  "
                 f"evals={best['n_eval']}  improves={best['n_improve']}  "
-                f"Σd={sum_nm(x):.1f} nm",
+                f"Σd={sum_nm(x_best):.1f} nm",
                 flush=True,
             )
             print(
@@ -949,6 +1132,9 @@ class LMThicknessOptimizer:
             history=history,
             verbose=verbose,
             label="de",
+            final_layers=layers_final,
+            final_cost=final_cost,
+            start_cost=start_cost,
         )
 
     def _optimize_dual_annealing(
@@ -1035,21 +1221,25 @@ class LMThicknessOptimizer:
         for k, j in enumerate(free):
             x[j] = float(result.x[k])
         x = self._project(materials, x)
-        result_cost = self.cost(list(zip(materials, x)))
+        layers_final = list(zip(materials, x))
+        result_cost = self.cost(layers_final)
         if best["cost"] <= result_cost + 1e-15:
-            x = list(best["x"])
-        layers_best = list(zip(materials, x))
-        final_cost = self.cost(layers_best)
-        if abs(final_cost - history[-1]) > 1e-15:
-            history.append(final_cost)
+            x_best = list(best["x"])
+        else:
+            x_best = list(x)
+        layers_best = list(zip(materials, x_best))
+        final_cost = result_cost
+        best_cost = self.cost(layers_best)
+        if abs(best_cost - history[-1]) > 1e-15:
+            history.append(best_cost)
         if verbose:
-            free_nm = [round(x[j] * 1e9, 2) for j in free]
+            free_nm = [round(x_best[j] * 1e9, 2) for j in free]
             print(
-                f"    DA done: cost={final_cost:.6e}  "
-                f"Δ={final_cost - start_cost:+.3e}  "
+                f"    DA done: best={best_cost:.6e}  final={final_cost:.6e}  "
+                f"Δ={best_cost - start_cost:+.3e}  "
                 f"success={bool(result.success)}  "
                 f"evals={best['n_eval']}  improves={best['n_improve']}  "
-                f"Σd={sum_nm(x):.1f} nm  steps={step_count['n']}",
+                f"Σd={sum_nm(x_best):.1f} nm  steps={step_count['n']}",
                 flush=True,
             )
             print(
@@ -1063,6 +1253,9 @@ class LMThicknessOptimizer:
             history=history,
             verbose=verbose,
             label="dual_annealing",
+            final_layers=layers_final,
+            final_cost=final_cost,
+            start_cost=start_cost,
         )
 
     def _set_wavelengths(self, wavelengths: Sequence[float]) -> None:
@@ -1124,7 +1317,10 @@ class LMThicknessOptimizer:
         r = self.residuals(list(zip(materials, x)))
         cost = 0.5 * sum(v * v for v in r)
         history = [cost]
+        start_cost = cost
+        x0 = list(x)
         best_x, best_cost, best_r, best_iter = list(x), cost, r, 0
+        self._begin_run(x0, start_cost)
 
         m = [0.0] * len(x)
         v = [0.0] * len(x)
@@ -1153,7 +1349,7 @@ class LMThicknessOptimizer:
             )
             history.append(cost)
 
-            if cost < best_cost - 1e-12:
+            if self._accept_best(x, cost, best_x, best_cost):
                 best_x, best_cost, best_r, best_iter = list(x), cost, r, it
                 stale = 0
                 n_improve += 1
@@ -1179,6 +1375,7 @@ class LMThicknessOptimizer:
                 print(
                     f"    Adam iter {it:3d}: cost={cost:.6e}  "
                     f"best={best_cost:.6e}@iter{best_iter}  "
+                    f"Δ={best_cost - start_cost:+.3e}  "
                     f"lr={lr*1e9:.2f} nm  Σd={sum(best_x)*1e9:.1f} nm",
                     flush=True,
                 )
@@ -1191,15 +1388,18 @@ class LMThicknessOptimizer:
                         iter=it,
                         n_improve=n_improve,
                     )
-                return OptimResult(
-                    list(zip(materials, best_x)),
-                    best_cost,
-                    best_r,
-                    it,
-                    True,
-                    "converged",
-                    history,
+                return self._make_result(
+                    best_layers=list(zip(materials, best_x)),
+                    best_cost=best_cost,
+                    best_r=best_r,
+                    n_iter=it,
+                    success=True,
+                    message="converged",
+                    history=history,
                     best_iter=best_iter,
+                    final_layers=list(zip(materials, x)),
+                    final_cost=cost,
+                    start_cost=start_cost,
                 )
 
         if pending_best:
@@ -1210,15 +1410,18 @@ class LMThicknessOptimizer:
                 iter=self.max_iter,
                 n_improve=n_improve,
             )
-        return OptimResult(
-            list(zip(materials, best_x)),
-            best_cost,
-            best_r,
-            self.max_iter,
-            best_cost < history[0],
-            "max_iter",
-            history,
+        return self._make_result(
+            best_layers=list(zip(materials, best_x)),
+            best_cost=best_cost,
+            best_r=best_r,
+            n_iter=self.max_iter,
+            success=best_cost < history[0],
+            message="max_iter",
+            history=history,
             best_iter=best_iter,
+            final_layers=list(zip(materials, x)),
+            final_cost=cost,
+            start_cost=start_cost,
         )
 
     def _optimize_adam_minibatch(
@@ -1257,7 +1460,10 @@ class LMThicknessOptimizer:
         r = self.residuals(list(zip(materials, x)))
         full_cost = 0.5 * sum(v * v for v in r)
         history = [full_cost]
+        start_cost = full_cost
+        x0 = list(x)
         best_x, best_cost, best_r, best_iter = list(x), full_cost, r, 0
+        self._begin_run(x0, start_cost)
 
         m = [0.0] * len(x)
         v = [0.0] * len(x)
@@ -1333,7 +1539,7 @@ class LMThicknessOptimizer:
             full_cost = 0.5 * sum(v_i * v_i for v_i in r)
             history.append(full_cost)
 
-            if full_cost < best_cost - 1e-12:
+            if self._accept_best(x, full_cost, best_x, best_cost):
                 best_x, best_cost, best_r, best_iter = list(x), full_cost, r, epoch
                 stale = 0
                 n_improve += 1
@@ -1361,6 +1567,7 @@ class LMThicknessOptimizer:
                     f"    epoch {epoch:3d} done: full_cost={full_cost:.6e}  "
                     f"mean_batch_cost={mean_batch:.6e}  "
                     f"best={best_cost:.6e}@epoch{best_iter}  "
+                    f"Δ={best_cost - start_cost:+.3e}  "
                     f"lr={lr*nm:.2f} nm  Σd={sum(best_x)*nm:.1f} nm",
                     flush=True,
                 )
@@ -1374,15 +1581,18 @@ class LMThicknessOptimizer:
                         n_improve=n_improve,
                     )
                 self._set_wavelengths(full_wls)
-                return OptimResult(
-                    list(zip(materials, best_x)),
-                    best_cost,
-                    best_r,
-                    epoch,
-                    True,
-                    "converged",
-                    history,
+                return self._make_result(
+                    best_layers=list(zip(materials, best_x)),
+                    best_cost=best_cost,
+                    best_r=best_r,
+                    n_iter=epoch,
+                    success=True,
+                    message="converged",
+                    history=history,
                     best_iter=best_iter,
+                    final_layers=list(zip(materials, x)),
+                    final_cost=full_cost,
+                    start_cost=start_cost,
                 )
 
         if pending_best:
@@ -1394,15 +1604,18 @@ class LMThicknessOptimizer:
                 n_improve=n_improve,
             )
         self._set_wavelengths(full_wls)
-        return OptimResult(
-            list(zip(materials, best_x)),
-            best_cost,
-            best_r,
-            n_epochs,
-            best_cost < history[0],
-            "max_epochs",
-            history,
+        return self._make_result(
+            best_layers=list(zip(materials, best_x)),
+            best_cost=best_cost,
+            best_r=best_r,
+            n_iter=n_epochs,
+            success=best_cost < history[0],
+            message="max_epochs",
+            history=history,
             best_iter=best_iter,
+            final_layers=list(zip(materials, x)),
+            final_cost=full_cost,
+            start_cost=start_cost,
         )
 
     def _optimize_lm(
@@ -1420,7 +1633,10 @@ class LMThicknessOptimizer:
         r = self.residuals(list(zip(materials, x)))
         cost = 0.5 * sum(v * v for v in r)
         history.append(cost)
+        start_cost = cost
+        x0 = list(x)
         best_x, best_cost, best_r, best_iter = list(x), cost, r, 0
+        self._begin_run(x0, start_cost)
 
         if verbose:
             print(
@@ -1468,7 +1684,7 @@ class LMThicknessOptimizer:
                 step_norm = math.sqrt(sum(d * d for d in delta))
                 x, r, cost = x_trial, r_trial, cost_trial
                 history.append(cost)
-                if cost < best_cost - 1e-12:
+                if self._accept_best(x, cost, best_x, best_cost):
                     best_x, best_cost, best_r, best_iter = list(x), cost, r, it
                     n_improve += 1
                     pending_best = True
@@ -1492,6 +1708,7 @@ class LMThicknessOptimizer:
                     print(
                         f"    LM iter {it:3d}: cost={cost:.6e}  "
                         f"best={best_cost:.6e}@iter{best_iter}  "
+                        f"Δ={best_cost - start_cost:+.3e}  "
                         f"λ={lam:.2e}  Σd={total_nm:.1f} nm",
                         flush=True,
                     )
@@ -1504,15 +1721,18 @@ class LMThicknessOptimizer:
                             iter=it,
                             n_improve=n_improve,
                         )
-                    return OptimResult(
-                        list(zip(materials, best_x)),
-                        best_cost,
-                        best_r,
-                        it,
-                        True,
-                        "converged",
-                        history,
+                    return self._make_result(
+                        best_layers=list(zip(materials, best_x)),
+                        best_cost=best_cost,
+                        best_r=best_r,
+                        n_iter=it,
+                        success=True,
+                        message="converged",
+                        history=history,
                         best_iter=best_iter,
+                        final_layers=list(zip(materials, x)),
+                        final_cost=cost,
+                        start_cost=start_cost,
                     )
             else:
                 lam = min(lam * 3.0, 1e8)
@@ -1525,15 +1745,18 @@ class LMThicknessOptimizer:
                 iter=self.max_iter,
                 n_improve=n_improve,
             )
-        return OptimResult(
-            list(zip(materials, best_x)),
-            best_cost,
-            best_r,
-            self.max_iter,
-            best_cost < history[0],
-            "max_iter",
-            history,
+        return self._make_result(
+            best_layers=list(zip(materials, best_x)),
+            best_cost=best_cost,
+            best_r=best_r,
+            n_iter=self.max_iter,
+            success=best_cost < history[0],
+            message="max_iter",
+            history=history,
             best_iter=best_iter,
+            final_layers=list(zip(materials, x)),
+            final_cost=cost,
+            start_cost=start_cost,
         )
 
     def evaluate(self, layers: Sequence[tuple[str, float]]):

@@ -108,7 +108,8 @@ sim/
 
 - **`optimizer.method`**：局部 `lm` / `adam`；全局（需 scipy）`de`（differential evolution）或 `dual_annealing`。全局可调 `de_popsize`、`global_seed`、`global_polish` 等。  
 - **`global_polish_method`**：全局搜索后再局部精修，`none` / `lm` / `adam`（兼容旧字段 `global_polish_lm: true` → `lm`）。开启后会同时写出 `stack_global.json`（DE/DA）与 `stack_polished.json`（精修后；`stack_optimised.json` 同精修结果）。  
-- **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.json`，并追加 `best_updates.csv`。全局 DE/DA 仍按每次 NEW best 写入；局部 LM/Adam 按 `checkpoint_local_every` 节流（默认全网格每 5 iter、mini-batch 每 1 epoch），结束时若有未写出的 best 会补写。  
+- **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.json`，并追加 `best_updates.csv`（含 `cost` / `delta` / `thickness_delta_nm`）。同时刷新 `rt_best.png`、`spectrum_best.csv`、`band_stats_best.csv`（可用 `checkpoint_plot_rt: false` 关闭出图）。全局 DE/DA 仍按每次 NEW best 写入；局部 LM/Adam 按 `checkpoint_local_every` 节流（默认全网格每 5 iter、mini-batch 每 1 epoch），结束时若有未写出的 best 会补写。  
+- **最优 checkpoint 选择**：同时看 **cost** 与相对初始膜系的厚度 RMS **Δ**。默认 `checkpoint_delta_weight=0` 时以 cost 为主，近并列时取厚度变化更小者；`>0` 时用 `score = cost + w · (rms_nm/100)`。结束时写出 **best** 与 **final** 两套：`stack_best` / `stack_final`、`rt_best.png` / `rt_final.png`、`spectrum_*.csv`、`band_stats_*.csv`。  
 - **`layers` 与 `seed`**：有 `layers` 则用给定膜系；否则可用 `seed` 生成啁啾 1/4 波长堆；都没有则用简单单周期种子。  
 - **`bands`**：每段可设 `R_min` / `R_max` / `T_min` / `T_max`，以及可选的连续目标 `R_target` / `T_target`。  
 - **`rt_engine`**：`tmm`（默认 CPU）、`tmm_cuda`（CuPy 波长批量 TMM，需 NVIDIA GPU）、或 `external`。也可用顶层 `"use_cuda": true`。  

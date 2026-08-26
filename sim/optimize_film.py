@@ -210,8 +210,18 @@ def make_best_checkpoint_saver(
     *,
     base_meta: dict | None = None,
     enabled: bool = True,
+    plot_rt_live: bool = True,
+    calc=None,
+    plot_wls: list[float] | None = None,
+    bands: list | None = None,
+    theta0: float = 0.0,
+    rt_kw: dict | None = None,
 ):
-    """Return ``on_best(layers, cost, info)`` that rewrites live best outputs."""
+    """Return ``on_best(layers, cost, info)`` that rewrites live best outputs.
+
+    When ``plot_rt_live`` and RT helpers are provided, also refreshes
+    ``rt_best.png``, ``spectrum_best.csv``, and ``band_stats_best.csv``.
+    """
     if not enabled:
         return None
 
@@ -222,12 +232,17 @@ def make_best_checkpoint_saver(
     if not os.path.isfile(log_path):
         with open(log_path, "w", encoding="utf-8") as fh:
             fh.write(
-                "update,stage,iter,n_eval,n_improve,cost,total_thickness_nm\n"
+                "update,stage,iter,n_eval,n_improve,cost,delta,thickness_delta_nm,"
+                "total_thickness_nm\n"
             )
 
     def on_best(layers, cost, info) -> None:
+        from plot_rt import plot_rt, write_band_stats_csv, write_spectrum_csv
+
         state["n"] += 1
         total_nm = sum(d for _, d in layers) * 1e9
+        delta = float(info.get("delta", 0.0) or 0.0)
+        d_rms = float(info.get("thickness_delta_nm", 0.0) or 0.0)
         meta = {
             **(base_meta or {}),
             "live_best": True,
@@ -237,6 +252,8 @@ def make_best_checkpoint_saver(
             "n_eval": info.get("n_eval", 0),
             "n_improve": info.get("n_improve", 0),
             "cost": float(cost),
+            "delta": delta,
+            "thickness_delta_nm": d_rms,
         }
         write_stack_json(stack_path, layers, meta)
         with open(log_path, "a", encoding="utf-8") as fh:
@@ -247,11 +264,42 @@ def make_best_checkpoint_saver(
                 f"{info.get('n_eval', 0)},"
                 f"{info.get('n_improve', 0)},"
                 f"{float(cost):.12e},"
+                f"{delta:.12e},"
+                f"{d_rms:.6f},"
                 f"{total_nm:.4f}\n"
+            )
+        if (
+            plot_rt_live
+            and calc is not None
+            and plot_wls
+            and bands is not None
+        ):
+            R, T = calc.spectrum(layers, plot_wls, theta0, **(rt_kw or {}))
+            plot_rt(
+                os.path.join(out_dir, "rt_best.png"),
+                plot_wls,
+                R,
+                T,
+                bands=bands,
+                title=(
+                    f"live best  cost={float(cost):.4e}  "
+                    f"Δ={delta:+.3e}  #{state['n']}"
+                ),
+            )
+            write_spectrum_csv(
+                os.path.join(out_dir, "spectrum_best.csv"), plot_wls, R, T
+            )
+            write_band_stats_csv(
+                os.path.join(out_dir, "band_stats_best.csv"),
+                plot_wls,
+                R,
+                T,
+                bands,
             )
         print(
             f"    checkpoint: updated {stack_path}  "
-            f"cost={float(cost):.6e}  stage={info.get('stage', '')}  "
+            f"cost={float(cost):.6e}  Δ={delta:+.3e}  "
+            f"d_rms={d_rms:.2f} nm  stage={info.get('stage', '')}  "
             f"update=#{state['n']}",
             flush=True,
         )
@@ -438,6 +486,7 @@ def run(cfg: dict, input_path: str) -> int:
         "da_visit": float(opt_cfg.get("da_visit", 2.62)),
         "da_accept": float(opt_cfg.get("da_accept", -5.0)),
         "checkpoint_local_every": opt_cfg.get("checkpoint_local_every"),
+        "checkpoint_delta_weight": float(opt_cfg.get("checkpoint_delta_weight", 0.0)),
     }
     if lm_kwargs["global_seed"] is not None:
         lm_kwargs["global_seed"] = int(lm_kwargs["global_seed"])
@@ -453,17 +502,7 @@ def run(cfg: dict, input_path: str) -> int:
 
     os.makedirs(out_dir, exist_ok=True)
     checkpoint_on_best = bool(opt_cfg.get("checkpoint_on_best", True))
-    optimizer.on_best = make_best_checkpoint_saver(
-        out_dir,
-        base_meta={
-            "input": os.path.abspath(input_path),
-            "incident_angle_deg": angle_deg,
-            "rt_engine": cfg.get("rt_engine", "tmm"),
-            "method": lm_kwargs["method"],
-            "global_polish_method": optimizer.global_polish_method,
-        },
-        enabled=checkpoint_on_best,
-    )
+    checkpoint_plot_rt = bool(opt_cfg.get("checkpoint_plot_rt", True))
 
     print("IR / optical thin-film optimiser", flush=True)
     print(f"  input: {input_path}", flush=True)
@@ -475,6 +514,10 @@ def run(cfg: dict, input_path: str) -> int:
     ):
         print("  use_cuda: True (CuPy wavelength-batched TMM)", flush=True)
     print(f"  thickness method: {lm_kwargs['method']}", flush=True)
+    print(
+        f"  checkpoint_delta_weight: {lm_kwargs['checkpoint_delta_weight']:g}",
+        flush=True,
+    )
     if checkpoint_on_best:
         print(f"  checkpoint_on_best: {os.path.join(out_dir, 'stack_best.json')}", flush=True)
     print(f"  substrate_model: {substrate_model}", flush=True)
@@ -493,6 +536,23 @@ def run(cfg: dict, input_path: str) -> int:
         exit_medium=lm_kwargs["exit_medium"],
         polarization=lm_kwargs["polarization"],
         substrate_model=substrate_model,
+    )
+    optimizer.on_best = make_best_checkpoint_saver(
+        out_dir,
+        base_meta={
+            "input": os.path.abspath(input_path),
+            "incident_angle_deg": angle_deg,
+            "rt_engine": cfg.get("rt_engine", "tmm"),
+            "method": lm_kwargs["method"],
+            "global_polish_method": optimizer.global_polish_method,
+        },
+        enabled=checkpoint_on_best,
+        plot_rt_live=checkpoint_plot_rt,
+        calc=calc,
+        plot_wls=plot_wls,
+        bands=bands,
+        theta0=theta0,
+        rt_kw=rt_kw,
     )
     R0, T0 = calc.spectrum(layers0, plot_wls, theta0, **rt_kw)
     _, _, ok0, report0 = optimizer.evaluate(layers0)
@@ -538,18 +598,43 @@ def run(cfg: dict, input_path: str) -> int:
         )
         print(f"  global cost={g.cost:.6e}", flush=True)
 
-    print_report("After optimisation", layers1, report1, ok1)
+    print_report("After optimisation (best)", layers1, report1, ok1)
     if opt_result is not None:
+        start_c = opt_result.start_cost
+        delta = (
+            opt_result.cost - start_c if start_c is not None else None
+        )
         print(
-            f"  final cost={opt_result.cost:.6e}  msg={opt_result.message}",
+            f"  best cost={opt_result.cost:.6e}"
+            + (f"  Δ={delta:+.3e}" if delta is not None else "")
+            + f"  msg={opt_result.message}",
             flush=True,
         )
 
+    layers_final = (
+        opt_result.final_layers
+        if opt_result is not None and opt_result.final_layers is not None
+        else layers1
+    )
+    final_cost = (
+        opt_result.final_cost
+        if opt_result is not None and opt_result.final_cost is not None
+        else (opt_result.cost if opt_result is not None else None)
+    )
+    _, _, ok_final, report_final = optimizer.evaluate(layers_final)
+    if layers_final is not layers1:
+        print_report("Final iterate", layers_final, report_final, ok_final)
+        if final_cost is not None:
+            print(f"  final cost={final_cost:.6e}", flush=True)
+
     R1, T1 = calc.spectrum(layers1, plot_wls, theta0, **rt_kw)
+    Rf, Tf = calc.spectrum(layers_final, plot_wls, theta0, **rt_kw)
 
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, "spectrum_before_after.csv")
     stack_path = os.path.join(out_dir, "stack_optimised.json")
+    stack_best = os.path.join(out_dir, "stack_best.json")
+    stack_final = os.path.join(out_dir, "stack_final.json")
     plot_path = os.path.join(out_dir, "rt_and_n_before_after.png")
 
     write_spectrum_csv(csv_path, plot_wls, R0, T0, R1, T1)
@@ -560,17 +645,93 @@ def run(cfg: dict, input_path: str) -> int:
         "rt_engine": cfg.get("rt_engine", "tmm"),
         "method": lm_kwargs["method"],
         "global_polish_method": optimizer.global_polish_method,
+        "checkpoint_delta_weight": lm_kwargs["checkpoint_delta_weight"],
     }
+    start_c = opt_result.start_cost if opt_result is not None else None
+    best_delta = (
+        (opt_result.cost - start_c)
+        if opt_result is not None and start_c is not None
+        else None
+    )
+    write_stack_json(
+        stack_best,
+        layers1,
+        {
+            **base_meta,
+            "stage": "best",
+            "specs_satisfied": ok1,
+            "cost": opt_result.cost if opt_result is not None else None,
+            "delta": best_delta,
+            "message": opt_result.message if opt_result is not None else None,
+        },
+    )
+    write_stack_json(
+        stack_final,
+        layers_final,
+        {
+            **base_meta,
+            "stage": "final",
+            "specs_satisfied": ok_final,
+            "cost": final_cost,
+            "delta": (
+                (final_cost - start_c)
+                if final_cost is not None and start_c is not None
+                else None
+            ),
+            "message": opt_result.message if opt_result is not None else None,
+        },
+    )
     write_stack_json(
         stack_path,
         layers1,
         {
             **base_meta,
-            "stage": "polished" if (opt_result and opt_result.pre_polish) else "final",
+            "stage": "best",
+            "alias_of": "stack_best.json",
             "specs_satisfied": ok1,
             "cost": opt_result.cost if opt_result is not None else None,
+            "delta": best_delta,
             "message": opt_result.message if opt_result is not None else None,
         },
+    )
+
+    from plot_rt import (
+        plot_rt,
+        write_band_stats_csv,
+        write_spectrum_csv as write_rt_spectrum_csv,
+    )
+
+    write_rt_spectrum_csv(
+        os.path.join(out_dir, "spectrum_best.csv"), plot_wls, R1, T1
+    )
+    write_rt_spectrum_csv(
+        os.path.join(out_dir, "spectrum_final.csv"), plot_wls, Rf, Tf
+    )
+    write_band_stats_csv(
+        os.path.join(out_dir, "band_stats_best.csv"), plot_wls, R1, T1, bands
+    )
+    write_band_stats_csv(
+        os.path.join(out_dir, "band_stats_final.csv"), plot_wls, Rf, Tf, bands
+    )
+    plot_rt(
+        os.path.join(out_dir, "rt_best.png"),
+        plot_wls,
+        R1,
+        T1,
+        bands=bands,
+        title=f"best  cost={opt_result.cost:.4e}" if opt_result else "best",
+    )
+    plot_rt(
+        os.path.join(out_dir, "rt_final.png"),
+        plot_wls,
+        Rf,
+        Tf,
+        bands=bands,
+        title=(
+            f"final  cost={final_cost:.4e}"
+            if final_cost is not None
+            else "final"
+        ),
     )
 
     if opt_result is not None and opt_result.pre_polish is not None:
@@ -629,7 +790,13 @@ def run(cfg: dict, input_path: str) -> int:
     plot_results(plot_path, plot_wls, R0, T0, R1, T1, bands, mats)
 
     print(f"\n  wrote {csv_path}")
+    print(f"  wrote {stack_best}")
+    print(f"  wrote {stack_final}")
     print(f"  wrote {stack_path}")
+    print(f"  wrote {os.path.join(out_dir, 'rt_best.png')}")
+    print(f"  wrote {os.path.join(out_dir, 'rt_final.png')}")
+    print(f"  wrote {os.path.join(out_dir, 'band_stats_best.csv')}")
+    print(f"  wrote {os.path.join(out_dir, 'band_stats_final.csv')}")
     print(f"  wrote {plot_path}")
     return 0 if ok1 else 2
 
