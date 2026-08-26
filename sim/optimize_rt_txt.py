@@ -617,6 +617,21 @@ def run(stack_path: str, cfg_path: str) -> int:
         n_batches=n_batches,
         n_epochs=n_epochs,
         shuffle_seed=shuffle_seed,
+        de_popsize=int(cfg.get("de_popsize", 15)),
+        de_mutation=(
+            tuple(cfg["de_mutation"])
+            if isinstance(cfg.get("de_mutation"), list)
+            else cfg.get("de_mutation", (0.5, 1.0))
+        ),
+        de_recombination=float(cfg.get("de_recombination", 0.7)),
+        global_seed=(
+            int(cfg["global_seed"]) if cfg.get("global_seed") is not None else None
+        ),
+        global_polish=bool(cfg.get("global_polish", True)),
+        global_polish_lm=bool(cfg.get("global_polish_lm", False)),
+        da_initial_temp=float(cfg.get("da_initial_temp", 5230.0)),
+        da_visit=float(cfg.get("da_visit", 2.62)),
+        da_accept=float(cfg.get("da_accept", -5.0)),
     )
 
     print("Text-stack R-target MSE thickness optimiser")
@@ -792,7 +807,7 @@ def main(argv: list[str] | None = None) -> int:
         "config",
         nargs="?",
         default=os.path.join(here, "examples", "example_optimize_rt_txt.json"),
-        help="JSON with n_bands, bands[].objective, method=adam|lm",
+        help="JSON with n_bands, bands[].objective, method=adam|lm|de|dual_annealing",
     )
     args = ap.parse_args(argv)
     return run(args.stack, args.config)

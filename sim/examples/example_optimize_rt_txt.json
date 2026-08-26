@@ -1,5 +1,5 @@
 {
-  "comment": "3-band joint R optimisation on a constant-n,k text stack (Adam or LM only).",
+  "comment": "3-band joint R optimisation on a constant-n,k text stack (adam|lm|de|dual_annealing).",
   "n_bands": 3,
   "method": "adam",
   "bands": [

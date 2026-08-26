@@ -532,4 +532,13 @@ def make_optimizer_from_config(
         n_batches=cfg.get("n_batches"),
         n_epochs=cfg.get("n_epochs"),
         shuffle_seed=cfg.get("shuffle_seed"),
+        de_popsize=int(cfg.get("de_popsize", 15)),
+        de_mutation=cfg.get("de_mutation", (0.5, 1.0)),
+        de_recombination=float(cfg.get("de_recombination", 0.7)),
+        global_seed=cfg.get("global_seed"),
+        global_polish=bool(cfg.get("global_polish", True)),
+        global_polish_lm=bool(cfg.get("global_polish_lm", False)),
+        da_initial_temp=float(cfg.get("da_initial_temp", 5230.0)),
+        da_visit=float(cfg.get("da_visit", 2.62)),
+        da_accept=float(cfg.get("da_accept", -5.0)),
     )

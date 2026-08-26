@@ -372,7 +372,24 @@ def run(cfg: dict, input_path: str) -> int:
         "adam_beta2": float(opt_cfg.get("adam_beta2", 0.999)),
         "adam_eps": float(opt_cfg.get("adam_eps", 1e-8)),
         "adam_max_step": _nm(float(opt_cfg.get("adam_max_step_nm", 10.0))),
+        "de_popsize": int(opt_cfg.get("de_popsize", 15)),
+        "de_mutation": opt_cfg.get("de_mutation", (0.5, 1.0)),
+        "de_recombination": float(opt_cfg.get("de_recombination", 0.7)),
+        "global_seed": opt_cfg.get("global_seed"),
+        "global_polish": bool(opt_cfg.get("global_polish", True)),
+        "global_polish_lm": bool(opt_cfg.get("global_polish_lm", False)),
+        "da_initial_temp": float(opt_cfg.get("da_initial_temp", 5230.0)),
+        "da_visit": float(opt_cfg.get("da_visit", 2.62)),
+        "da_accept": float(opt_cfg.get("da_accept", -5.0)),
     }
+    if lm_kwargs["global_seed"] is not None:
+        lm_kwargs["global_seed"] = int(lm_kwargs["global_seed"])
+    # JSON may store de_mutation as [lo, hi]; scipy accepts tuple or float.
+    mut = lm_kwargs["de_mutation"]
+    if isinstance(mut, list) and len(mut) == 2:
+        lm_kwargs["de_mutation"] = (float(mut[0]), float(mut[1]))
+    elif isinstance(mut, (int, float)):
+        lm_kwargs["de_mutation"] = float(mut)
     optimizer = make_optimizer_from_config(calc, bands, lm_kwargs)
 
     print("IR / optical thin-film optimiser", flush=True)

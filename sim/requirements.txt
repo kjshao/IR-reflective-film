@@ -1,2 +1,4 @@
 # Optional dependencies for sim/optimize_film.py
 matplotlib>=3.5
+# Global thickness methods: method=de | dual_annealing
+scipy>=1.9

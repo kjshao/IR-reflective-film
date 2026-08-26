@@ -237,8 +237,30 @@ def band_report(
     return out
 
 
+# Global (scipy) method aliases → canonical name.
+_GLOBAL_METHODS = {
+    "de": "de",
+    "differential_evolution": "de",
+    "diffevo": "de",
+    "da": "da",
+    "dual_annealing": "da",
+    "annealing": "da",
+}
+
+
+def _require_scipy():
+    try:
+        import scipy.optimize as spo
+    except ImportError as exc:
+        raise SystemExit(
+            "scipy is required for global methods "
+            "('de' / 'dual_annealing'); pip install scipy"
+        ) from exc
+    return spo
+
+
 class LMThicknessOptimizer:
-    """Thickness optimiser: Levenberg-Marquardt (default) or Adam."""
+    """Thickness optimiser: LM, Adam, or scipy global (DE / dual annealing)."""
 
     def __init__(
         self,
@@ -270,6 +292,16 @@ class LMThicknessOptimizer:
         n_batches: int | None = None,
         n_epochs: int | None = None,
         shuffle_seed: int | None = None,
+        # scipy global search (differential_evolution / dual_annealing)
+        de_popsize: int = 15,
+        de_mutation: float | tuple[float, float] = (0.5, 1.0),
+        de_recombination: float = 0.7,
+        global_seed: int | None = None,
+        global_polish: bool = True,
+        global_polish_lm: bool = False,
+        da_initial_temp: float = 5230.0,
+        da_visit: float = 2.62,
+        da_accept: float = -5.0,
     ):
         self.calc = calculator
         self.bands = list(bands)
@@ -302,6 +334,15 @@ class LMThicknessOptimizer:
             self.n_batches = int(n_batches)
         self.n_epochs = max_iter if n_epochs is None else int(n_epochs)
         self.shuffle_seed = shuffle_seed
+        self.de_popsize = int(de_popsize)
+        self.de_mutation = de_mutation
+        self.de_recombination = float(de_recombination)
+        self.global_seed = global_seed
+        self.global_polish = bool(global_polish)
+        self.global_polish_lm = bool(global_polish_lm)
+        self.da_initial_temp = float(da_initial_temp)
+        self.da_visit = float(da_visit)
+        self.da_accept = float(da_accept)
 
     def _rt(self, layers: Sequence[tuple[str, float]]):
         return self.calc.spectrum(
@@ -518,11 +559,271 @@ class LMThicknessOptimizer:
             return self._optimize_adam(
                 layers, free_indices=free_indices, verbose=verbose
             )
+        global_name = _GLOBAL_METHODS.get(self.method)
+        if global_name == "de":
+            return self._optimize_differential_evolution(
+                layers, free_indices=free_indices, verbose=verbose
+            )
+        if global_name == "da":
+            return self._optimize_dual_annealing(
+                layers, free_indices=free_indices, verbose=verbose
+            )
         if self.method not in ("lm", "levenberg", "levenberg-marquardt"):
             raise ValueError(
-                f"unknown optimizer method {self.method!r}; use 'lm' or 'adam'"
+                f"unknown optimizer method {self.method!r}; "
+                "use 'lm', 'adam', 'de', or 'dual_annealing'"
             )
         return self._optimize_lm(layers, free_indices=free_indices, verbose=verbose)
+
+    def _global_objective_setup(
+        self,
+        layers: Sequence[tuple[str, float]],
+        free_indices: Sequence[int] | None,
+    ):
+        """Shared scaffolding for scipy global methods on free thicknesses."""
+        materials = [m for m, _ in layers]
+        x0_full = self._project(materials, [d for _, d in layers])
+        free = list(range(len(x0_full))) if free_indices is None else list(free_indices)
+        if not free:
+            raise ValueError("global optimisation needs at least one free layer")
+        bounds = [_bounds_for(materials[j]) for j in free]
+        x0_free = [x0_full[j] for j in free]
+        start_layers = list(zip(materials, x0_full))
+        start_cost = self.cost(start_layers)
+        history = [start_cost]
+        best = {
+            "x": list(x0_full),
+            "cost": start_cost,
+            "n_eval": 0,
+        }
+
+        def objective(x_free) -> float:
+            x = list(x0_full)
+            for k, j in enumerate(free):
+                x[j] = float(x_free[k])
+            x = self._project(materials, x)
+            c = self.cost(list(zip(materials, x)))
+            best["n_eval"] += 1
+            if c < best["cost"] - 1e-15:
+                best["cost"] = c
+                best["x"] = list(x)
+                history.append(c)
+            return c
+
+        return materials, x0_full, free, bounds, x0_free, start_cost, history, best, objective
+
+    def _maybe_polish_lm(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None,
+        history: list[float],
+        verbose: bool,
+        label: str,
+    ) -> OptimResult:
+        if not self.global_polish_lm:
+            cost = self.cost(layers)
+            best_iter = (
+                min(range(len(history)), key=lambda i: history[i]) if history else 0
+            )
+            return OptimResult(
+                list(layers),
+                cost,
+                self.residuals(layers),
+                max(0, len(history) - 1),
+                True,
+                label,
+                history,
+                best_iter=best_iter,
+            )
+        if verbose:
+            print(f"    {label}: LM polish …", flush=True)
+        polished = self._optimize_lm(
+            layers, free_indices=free_indices, verbose=verbose
+        )
+        merged = list(history) + list(polished.history[1:])
+        best_iter = min(range(len(merged)), key=lambda i: merged[i])
+        return OptimResult(
+            polished.layers,
+            polished.cost,
+            polished.residuals,
+            polished.n_iter + max(0, len(history) - 1),
+            polished.success,
+            f"{label}+lm",
+            merged,
+            best_iter=best_iter,
+        )
+
+    def _optimize_differential_evolution(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        """Bounded differential evolution (scipy) over free thicknesses."""
+        spo = _require_scipy()
+        (
+            materials,
+            _x0_full,
+            free,
+            bounds,
+            x0_free,
+            start_cost,
+            history,
+            best,
+            objective,
+        ) = self._global_objective_setup(layers, free_indices)
+
+        if verbose:
+            print(
+                f"    DE start: cost={start_cost:.6e}  layers={len(materials)}  "
+                f"free={len(free)}  popsize={self.de_popsize}  "
+                f"maxiter={self.max_iter}",
+                flush=True,
+            )
+
+        last_logged_gen = {"g": -1}
+
+        def callback(intermediate_result, convergence=None):
+            # scipy≥1.15 passes OptimizeResult; older passes (xk, convergence).
+            if hasattr(intermediate_result, "fun"):
+                fun = float(intermediate_result.fun)
+                gen = int(getattr(intermediate_result, "nit", 0))
+            else:
+                fun = best["cost"]
+                gen = max(0, len(history) - 1)
+            if gen == last_logged_gen["g"]:
+                return
+            last_logged_gen["g"] = gen
+            if verbose and (gen <= 1 or gen % 5 == 0 or gen == self.max_iter):
+                print(
+                    f"    DE gen {gen:3d}: cost={fun:.6e}  "
+                    f"best={best['cost']:.6e}  evals={best['n_eval']}",
+                    flush=True,
+                )
+
+        result = spo.differential_evolution(
+            objective,
+            bounds,
+            maxiter=self.max_iter,
+            popsize=self.de_popsize,
+            mutation=self.de_mutation,
+            recombination=self.de_recombination,
+            seed=self.global_seed,
+            polish=self.global_polish,
+            init="latinhypercube",
+            x0=x0_free,
+            atol=self.tol,
+            tol=0.01,
+            workers=1,
+            updating="immediate",
+            callback=callback,
+            disp=False,
+        )
+        x = list(_x0_full)
+        for k, j in enumerate(free):
+            x[j] = float(result.x[k])
+        x = self._project(materials, x)
+        layers_best = list(zip(materials, x))
+        # Ensure final point is recorded even if polish moved off the tracked best.
+        final_cost = self.cost(layers_best)
+        if final_cost < best["cost"] - 1e-15 or not history:
+            history.append(final_cost)
+        if verbose:
+            print(
+                f"    DE done: cost={final_cost:.6e}  "
+                f"success={bool(result.success)}  evals={best['n_eval']}  "
+                f"msg={result.message}",
+                flush=True,
+            )
+        return self._maybe_polish_lm(
+            layers_best,
+            free_indices=free_indices,
+            history=history,
+            verbose=verbose,
+            label="de",
+        )
+
+    def _optimize_dual_annealing(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        """Dual annealing (scipy) over free thicknesses."""
+        spo = _require_scipy()
+        (
+            materials,
+            _x0_full,
+            free,
+            bounds,
+            x0_free,
+            start_cost,
+            history,
+            best,
+            objective,
+        ) = self._global_objective_setup(layers, free_indices)
+
+        if verbose:
+            print(
+                f"    dual_annealing start: cost={start_cost:.6e}  "
+                f"layers={len(materials)}  free={len(free)}  "
+                f"maxiter={self.max_iter}",
+                flush=True,
+            )
+
+        last_log = {"n": 0}
+
+        def callback(x_free, f, context):
+            # context: 0=acceptance, 1=local search, 2=both finished steps
+            if verbose and (
+                best["n_eval"] - last_log["n"] >= 20 or context == 2
+            ):
+                last_log["n"] = best["n_eval"]
+                print(
+                    f"    DA evals={best['n_eval']:4d}: f={f:.6e}  "
+                    f"best={best['cost']:.6e}  context={context}",
+                    flush=True,
+                )
+            return False  # continue
+
+        kw = dict(
+            func=objective,
+            bounds=bounds,
+            maxiter=self.max_iter,
+            initial_temp=self.da_initial_temp,
+            visit=self.da_visit,
+            accept=self.da_accept,
+            seed=self.global_seed,
+            x0=x0_free,
+            callback=callback,
+            no_local_search=not self.global_polish,
+        )
+        result = spo.dual_annealing(**kw)
+        x = list(_x0_full)
+        for k, j in enumerate(free):
+            x[j] = float(result.x[k])
+        x = self._project(materials, x)
+        layers_best = list(zip(materials, x))
+        final_cost = self.cost(layers_best)
+        if final_cost < best["cost"] - 1e-15 or history[-1] != final_cost:
+            history.append(final_cost)
+        if verbose:
+            print(
+                f"    dual_annealing done: cost={final_cost:.6e}  "
+                f"success={bool(result.success)}  evals={best['n_eval']}  "
+                f"msg={result.message}",
+                flush=True,
+            )
+        return self._maybe_polish_lm(
+            layers_best,
+            free_indices=free_indices,
+            history=history,
+            verbose=verbose,
+            label="dual_annealing",
+        )
 
     def _set_wavelengths(self, wavelengths: Sequence[float]) -> None:
         """Swap active wavelength grid (used by mini-batch Adam)."""
