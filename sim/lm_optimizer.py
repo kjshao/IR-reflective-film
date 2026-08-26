@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Callable, Sequence
 
 from rt_calculator import RTCalculator
 
@@ -333,6 +333,9 @@ class LMThicknessOptimizer:
         da_initial_temp: float = 5230.0,
         da_visit: float = 2.62,
         da_accept: float = -5.0,
+        # Local (LM/Adam) best checkpoints: every N iters, or every N epochs
+        # for mini-batch Adam. Default: 5 (iters) / 1 (epochs if mini-batch).
+        checkpoint_local_every: int | None = None,
     ):
         self.calc = calculator
         self.bands = list(bands)
@@ -379,6 +382,55 @@ class LMThicknessOptimizer:
         self.da_initial_temp = float(da_initial_temp)
         self.da_visit = float(da_visit)
         self.da_accept = float(da_accept)
+        if checkpoint_local_every is None:
+            # Mini-batch: one checkpoint opportunity per epoch by default.
+            # Full-grid Adam/LM: throttle to every 5 iterations.
+            self.checkpoint_local_every = 1 if self.mini_batch else 5
+        else:
+            self.checkpoint_local_every = max(1, int(checkpoint_local_every))
+        # Optional: on_best(layers, cost, info_dict) when the running best improves.
+        self.on_best: Callable[..., None] | None = None
+        self._last_notified_cost: float | None = None
+
+    def _notify_best(
+        self,
+        layers: Sequence[tuple[str, float]],
+        cost: float,
+        *,
+        stage: str,
+        iter: int = 0,
+        n_eval: int = 0,
+        n_improve: int = 0,
+        force: bool = False,
+    ) -> None:
+        """Invoke ``on_best`` when ``cost`` improves over the last checkpoint."""
+        cb = self.on_best
+        if cb is None:
+            return
+        if (
+            not force
+            and self._last_notified_cost is not None
+            and cost >= self._last_notified_cost - 1e-15
+        ):
+            return
+        self._last_notified_cost = float(cost)
+        cb(
+            [(m, float(d)) for m, d in layers],
+            float(cost),
+            {
+                "stage": stage,
+                "iter": int(iter),
+                "n_eval": int(n_eval),
+                "n_improve": int(n_improve),
+            },
+        )
+
+    def _local_checkpoint_due(self, step: int, *, final: bool = False) -> bool:
+        """True on epoch/iter boundaries for throttled local checkpoints."""
+        if final:
+            return True
+        every = self.checkpoint_local_every
+        return step > 0 and step % every == 0
 
     def _rt(self, layers: Sequence[tuple[str, float]]):
         return self.calc.spectrum(
@@ -587,6 +639,9 @@ class LMThicknessOptimizer:
         free_indices: Sequence[int] | None = None,
         verbose: bool = True,
     ) -> OptimResult:
+        # Allow the first point of this run to be checkpointed even if a prior
+        # optimize() call already notified a similar cost.
+        self._last_notified_cost = None
         if self.method == "adam":
             if self.mini_batch:
                 return self._optimize_adam_minibatch(
@@ -637,6 +692,14 @@ class LMThicknessOptimizer:
             "n_improve": 0,
         }
         progress = {"last_heartbeat": 0}
+        self._notify_best(
+            start_layers,
+            start_cost,
+            stage=f"{tag}_start",
+            iter=0,
+            n_eval=0,
+            n_improve=0,
+        )
 
         def _sum_nm(x_vals: Sequence[float]) -> float:
             return sum(x_vals) * 1e9
@@ -646,7 +709,8 @@ class LMThicknessOptimizer:
             for k, j in enumerate(free):
                 x[j] = float(x_free[k])
             x = self._project(materials, x)
-            c = self.cost(list(zip(materials, x)))
+            layers_now = list(zip(materials, x))
+            c = self.cost(layers_now)
             best["n_eval"] += 1
             if c < best["cost"] - 1e-15:
                 best["cost"] = c
@@ -662,6 +726,14 @@ class LMThicknessOptimizer:
                         f"improves={best['n_improve']}",
                         flush=True,
                     )
+                self._notify_best(
+                    layers_now,
+                    c,
+                    stage=tag,
+                    iter=best["n_improve"],
+                    n_eval=best["n_eval"],
+                    n_improve=best["n_improve"],
+                )
             elif verbose and best["n_eval"] - progress["last_heartbeat"] >= 50:
                 progress["last_heartbeat"] = best["n_eval"]
                 print(
@@ -1065,6 +1137,15 @@ class LMThicknessOptimizer:
                 f"free={len(free)}  lr={lr*1e9:.2f} nm",
                 flush=True,
             )
+        self._notify_best(
+            list(zip(materials, x)),
+            cost,
+            stage="adam_start",
+            iter=0,
+            n_improve=0,
+        )
+        n_improve = 0
+        pending_best = False
 
         for it in range(1, self.max_iter + 1):
             x, cost, r, step_norm = self._adam_step(
@@ -1075,11 +1156,24 @@ class LMThicknessOptimizer:
             if cost < best_cost - 1e-12:
                 best_x, best_cost, best_r, best_iter = list(x), cost, r, it
                 stale = 0
+                n_improve += 1
+                pending_best = True
             else:
                 stale += 1
                 if stale >= 8:
                     lr = max(lr * 0.5, 0.05e-9)
                     stale = 0
+
+            done = step_norm < 1e-12 or best_cost < self.tol or it == self.max_iter
+            if pending_best and self._local_checkpoint_due(it, final=done):
+                self._notify_best(
+                    list(zip(materials, best_x)),
+                    best_cost,
+                    stage="adam",
+                    iter=it,
+                    n_improve=n_improve,
+                )
+                pending_best = False
 
             if verbose and (it == 1 or it % 5 == 0 or it == self.max_iter):
                 print(
@@ -1089,6 +1183,14 @@ class LMThicknessOptimizer:
                     flush=True,
                 )
             if step_norm < 1e-12 or best_cost < self.tol:
+                if pending_best:
+                    self._notify_best(
+                        list(zip(materials, best_x)),
+                        best_cost,
+                        stage="adam",
+                        iter=it,
+                        n_improve=n_improve,
+                    )
                 return OptimResult(
                     list(zip(materials, best_x)),
                     best_cost,
@@ -1100,6 +1202,14 @@ class LMThicknessOptimizer:
                     best_iter=best_iter,
                 )
 
+        if pending_best:
+            self._notify_best(
+                list(zip(materials, best_x)),
+                best_cost,
+                stage="adam",
+                iter=self.max_iter,
+                n_improve=n_improve,
+            )
         return OptimResult(
             list(zip(materials, best_x)),
             best_cost,
@@ -1168,6 +1278,15 @@ class LMThicknessOptimizer:
                 f"n_epochs={n_epochs}  lr={lr*nm:.2f} nm",
                 flush=True,
             )
+        self._notify_best(
+            list(zip(materials, x)),
+            full_cost,
+            stage="adam_minibatch_start",
+            iter=0,
+            n_improve=0,
+        )
+        pending_best = False
+        n_improve = 0
 
         for epoch in range(1, n_epochs + 1):
             batches = build_epoch_wavelength_batches(
@@ -1217,11 +1336,24 @@ class LMThicknessOptimizer:
             if full_cost < best_cost - 1e-12:
                 best_x, best_cost, best_r, best_iter = list(x), full_cost, r, epoch
                 stale = 0
+                n_improve += 1
+                pending_best = True
             else:
                 stale += 1
                 if stale >= 8:
                     lr = max(lr * 0.5, 0.05e-9)
                     stale = 0
+
+            done = best_cost < self.tol or epoch == n_epochs
+            if pending_best and self._local_checkpoint_due(epoch, final=done):
+                self._notify_best(
+                    list(zip(materials, best_x)),
+                    best_cost,
+                    stage="adam_minibatch",
+                    iter=epoch,
+                    n_improve=n_improve,
+                )
+                pending_best = False
 
             if verbose:
                 mean_batch = epoch_batch_cost_sum / max(1, n_batches)
@@ -1233,6 +1365,14 @@ class LMThicknessOptimizer:
                     flush=True,
                 )
             if best_cost < self.tol:
+                if pending_best:
+                    self._notify_best(
+                        list(zip(materials, best_x)),
+                        best_cost,
+                        stage="adam_minibatch",
+                        iter=epoch,
+                        n_improve=n_improve,
+                    )
                 self._set_wavelengths(full_wls)
                 return OptimResult(
                     list(zip(materials, best_x)),
@@ -1245,6 +1385,14 @@ class LMThicknessOptimizer:
                     best_iter=best_iter,
                 )
 
+        if pending_best:
+            self._notify_best(
+                list(zip(materials, best_x)),
+                best_cost,
+                stage="adam_minibatch",
+                iter=n_epochs,
+                n_improve=n_improve,
+            )
         self._set_wavelengths(full_wls)
         return OptimResult(
             list(zip(materials, best_x)),
@@ -1280,6 +1428,15 @@ class LMThicknessOptimizer:
                 f"free={len(free)}",
                 flush=True,
             )
+        self._notify_best(
+            list(zip(materials, x)),
+            cost,
+            stage="lm_start",
+            iter=0,
+            n_improve=0,
+        )
+        n_improve = 0
+        pending_best = False
 
         for it in range(1, self.max_iter + 1):
             J, free_cols = self._jacobian(materials, x, r, free)
@@ -1313,7 +1470,23 @@ class LMThicknessOptimizer:
                 history.append(cost)
                 if cost < best_cost - 1e-12:
                     best_x, best_cost, best_r, best_iter = list(x), cost, r, it
+                    n_improve += 1
+                    pending_best = True
                 lam = max(lam * 0.3, 1e-8)
+                done = (
+                    step_norm < 1e-12
+                    or best_cost < self.tol
+                    or it == self.max_iter
+                )
+                if pending_best and self._local_checkpoint_due(it, final=done):
+                    self._notify_best(
+                        list(zip(materials, best_x)),
+                        best_cost,
+                        stage="lm",
+                        iter=it,
+                        n_improve=n_improve,
+                    )
+                    pending_best = False
                 if verbose and (it == 1 or it % 5 == 0 or it == self.max_iter):
                     total_nm = sum(best_x) * 1e9
                     print(
@@ -1323,6 +1496,14 @@ class LMThicknessOptimizer:
                         flush=True,
                     )
                 if step_norm < 1e-12 or best_cost < self.tol:
+                    if pending_best:
+                        self._notify_best(
+                            list(zip(materials, best_x)),
+                            best_cost,
+                            stage="lm",
+                            iter=it,
+                            n_improve=n_improve,
+                        )
                     return OptimResult(
                         list(zip(materials, best_x)),
                         best_cost,
@@ -1336,6 +1517,14 @@ class LMThicknessOptimizer:
             else:
                 lam = min(lam * 3.0, 1e8)
 
+        if pending_best:
+            self._notify_best(
+                list(zip(materials, best_x)),
+                best_cost,
+                stage="lm",
+                iter=self.max_iter,
+                n_improve=n_improve,
+            )
         return OptimResult(
             list(zip(materials, best_x)),
             best_cost,

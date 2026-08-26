@@ -542,4 +542,5 @@ def make_optimizer_from_config(
         da_initial_temp=float(cfg.get("da_initial_temp", 5230.0)),
         da_visit=float(cfg.get("da_visit", 2.62)),
         da_accept=float(cfg.get("da_accept", -5.0)),
+        checkpoint_local_every=cfg.get("checkpoint_local_every"),
     )

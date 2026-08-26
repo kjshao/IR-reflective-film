@@ -205,6 +205,60 @@ def write_stack_json(path: str, layers: list[tuple[str, float]], meta: dict) -> 
         fh.write("\n")
 
 
+def make_best_checkpoint_saver(
+    out_dir: str,
+    *,
+    base_meta: dict | None = None,
+    enabled: bool = True,
+):
+    """Return ``on_best(layers, cost, info)`` that rewrites live best outputs."""
+    if not enabled:
+        return None
+
+    os.makedirs(out_dir, exist_ok=True)
+    stack_path = os.path.join(out_dir, "stack_best.json")
+    log_path = os.path.join(out_dir, "best_updates.csv")
+    state = {"n": 0}
+    if not os.path.isfile(log_path):
+        with open(log_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                "update,stage,iter,n_eval,n_improve,cost,total_thickness_nm\n"
+            )
+
+    def on_best(layers, cost, info) -> None:
+        state["n"] += 1
+        total_nm = sum(d for _, d in layers) * 1e9
+        meta = {
+            **(base_meta or {}),
+            "live_best": True,
+            "update_index": state["n"],
+            "stage": info.get("stage", ""),
+            "iter": info.get("iter", 0),
+            "n_eval": info.get("n_eval", 0),
+            "n_improve": info.get("n_improve", 0),
+            "cost": float(cost),
+        }
+        write_stack_json(stack_path, layers, meta)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(
+                f"{state['n']},"
+                f"{info.get('stage', '')},"
+                f"{info.get('iter', 0)},"
+                f"{info.get('n_eval', 0)},"
+                f"{info.get('n_improve', 0)},"
+                f"{float(cost):.12e},"
+                f"{total_nm:.4f}\n"
+            )
+        print(
+            f"    checkpoint: updated {stack_path}  "
+            f"cost={float(cost):.6e}  stage={info.get('stage', '')}  "
+            f"update=#{state['n']}",
+            flush=True,
+        )
+
+    return on_best
+
+
 def plot_results(
     path: str,
     wavelengths_m: list[float],
@@ -382,9 +436,12 @@ def run(cfg: dict, input_path: str) -> int:
         "da_initial_temp": float(opt_cfg.get("da_initial_temp", 5230.0)),
         "da_visit": float(opt_cfg.get("da_visit", 2.62)),
         "da_accept": float(opt_cfg.get("da_accept", -5.0)),
+        "checkpoint_local_every": opt_cfg.get("checkpoint_local_every"),
     }
     if lm_kwargs["global_seed"] is not None:
         lm_kwargs["global_seed"] = int(lm_kwargs["global_seed"])
+    if lm_kwargs["checkpoint_local_every"] is not None:
+        lm_kwargs["checkpoint_local_every"] = int(lm_kwargs["checkpoint_local_every"])
     # JSON may store de_mutation as [lo, hi]; scipy accepts tuple or float.
     mut = lm_kwargs["de_mutation"]
     if isinstance(mut, list) and len(mut) == 2:
@@ -393,10 +450,26 @@ def run(cfg: dict, input_path: str) -> int:
         lm_kwargs["de_mutation"] = float(mut)
     optimizer = make_optimizer_from_config(calc, bands, lm_kwargs)
 
+    os.makedirs(out_dir, exist_ok=True)
+    checkpoint_on_best = bool(opt_cfg.get("checkpoint_on_best", True))
+    optimizer.on_best = make_best_checkpoint_saver(
+        out_dir,
+        base_meta={
+            "input": os.path.abspath(input_path),
+            "incident_angle_deg": angle_deg,
+            "rt_engine": cfg.get("rt_engine", "tmm"),
+            "method": lm_kwargs["method"],
+            "global_polish_method": optimizer.global_polish_method,
+        },
+        enabled=checkpoint_on_best,
+    )
+
     print("IR / optical thin-film optimiser", flush=True)
     print(f"  input: {input_path}", flush=True)
     print(f"  angle: {angle_deg} deg  engine: {cfg.get('rt_engine', 'tmm')}", flush=True)
     print(f"  thickness method: {lm_kwargs['method']}", flush=True)
+    if checkpoint_on_best:
+        print(f"  checkpoint_on_best: {os.path.join(out_dir, 'stack_best.json')}", flush=True)
     print(f"  substrate_model: {substrate_model}", flush=True)
     print(f"  default materials: {', '.join(DEFAULT_MATERIALS)}", flush=True)
     print(f"  library materials: {', '.join(sorted(dsp.MATERIALS))}", flush=True)

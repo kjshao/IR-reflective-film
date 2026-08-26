@@ -491,6 +491,68 @@ def write_stack_txt(
         fh.write("\n".join(lines) + "\n")
 
 
+def make_txt_best_checkpoint_saver(
+    out_dir: str,
+    *,
+    incident: StackRow,
+    substrate: StackRow,
+    nk: dict[str, complex],
+    film_indices: list[int],
+    method: str,
+    enabled: bool = True,
+):
+    """Live-update ``stack_best.txt`` (+ CSV log) when the running best improves."""
+    if not enabled:
+        return None
+
+    os.makedirs(out_dir, exist_ok=True)
+    stack_live = os.path.join(out_dir, "stack_best.txt")
+    log_path = os.path.join(out_dir, "best_updates.csv")
+    state = {"n": 0}
+    if not os.path.isfile(log_path):
+        with open(log_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                "update,stage,iter,n_eval,n_improve,cost,total_thickness_nm\n"
+            )
+
+    def on_best(layers, cost, info) -> None:
+        state["n"] += 1
+        total_nm = sum(d for _, d in layers) / _NM
+        write_stack_txt(
+            stack_live,
+            incident,
+            layers,
+            substrate,
+            nk,
+            film_indices=film_indices,
+            header_lines=[
+                f"# live best  method={method}  update=#{state['n']}  "
+                f"stage={info.get('stage', '')}  "
+                f"mse={float(cost):.12e}  "
+                f"iter={info.get('iter', 0)}  n_eval={info.get('n_eval', 0)}",
+                "# rewritten whenever the running best improves",
+            ],
+        )
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(
+                f"{state['n']},"
+                f"{info.get('stage', '')},"
+                f"{info.get('iter', 0)},"
+                f"{info.get('n_eval', 0)},"
+                f"{info.get('n_improve', 0)},"
+                f"{float(cost):.12e},"
+                f"{total_nm:.4f}\n"
+            )
+        print(
+            f"    checkpoint: updated {stack_live}  "
+            f"cost={float(cost):.6e}  stage={info.get('stage', '')}  "
+            f"update=#{state['n']}",
+            flush=True,
+        )
+
+    return on_best
+
+
 def write_loss_history(path: str, history: list[float], best_iter: int) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -633,12 +695,27 @@ def run(stack_path: str, cfg_path: str) -> int:
         da_initial_temp=float(cfg.get("da_initial_temp", 5230.0)),
         da_visit=float(cfg.get("da_visit", 2.62)),
         da_accept=float(cfg.get("da_accept", -5.0)),
+        checkpoint_local_every=cfg.get("checkpoint_local_every"),
+    )
+
+    os.makedirs(out_dir, exist_ok=True)
+    checkpoint_on_best = bool(cfg.get("checkpoint_on_best", True))
+    opt.on_best = make_txt_best_checkpoint_saver(
+        out_dir,
+        incident=incident,
+        substrate=substrate,
+        nk=nk,
+        film_indices=film_indices,
+        method=method,
+        enabled=checkpoint_on_best,
     )
 
     print("Text-stack R-target MSE thickness optimiser")
     print(f"  stack: {stack_path}")
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
+    if checkpoint_on_best:
+        print(f"  checkpoint_on_best: {os.path.join(out_dir, 'stack_best.txt')}")
     if opt.mini_batch:
         print(
             f"  mini-batch: batch_size={opt.batch_size}  "

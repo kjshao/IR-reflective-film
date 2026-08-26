@@ -44,6 +44,8 @@
     "global_seed": 0,
     "global_polish": true,
     "global_polish_method": "lm",
+    "checkpoint_on_best": true,
+    "checkpoint_local_every": 5,
     "fd_step_nm": 1.0,
     "lambda0": 0.01
   },
