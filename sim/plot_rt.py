@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lm_optimizer import BandSpec
 from optimize_film import (
+    band_bg_color,
     build_chirped_seed,
     dense_grid_nm,
     load_input,
@@ -110,8 +111,15 @@ def plot_rt(
         label="A ≈ 1−R−T",
         alpha=0.8,
     )
-    for b in bands:
-        ax.axvspan(b.wl_lo / _NM, b.wl_hi / _NM, color="0.85", alpha=0.35, lw=0)
+    for i, b in enumerate(bands):
+        ax.axvspan(
+            b.wl_lo / _NM,
+            b.wl_hi / _NM,
+            color=band_bg_color(i),
+            alpha=0.45,
+            lw=0,
+            zorder=0,
+        )
         for val, color in (
             (b.R_min, "C0"),
             (b.R_max, "C0"),
@@ -136,8 +144,15 @@ def plot_rt(
     ax = axes[1]
     ax.plot(wl_nm, [100 * r for r in R], color="C0", label="R")
     ax.plot(wl_nm, [100 * t for t in T], color="C1", label="T")
-    for b in bands:
-        ax.axvspan(b.wl_lo / _NM, b.wl_hi / _NM, color="0.85", alpha=0.35, lw=0)
+    for i, b in enumerate(bands):
+        ax.axvspan(
+            b.wl_lo / _NM,
+            b.wl_hi / _NM,
+            color=band_bg_color(i),
+            alpha=0.45,
+            lw=0,
+            zorder=0,
+        )
     ax.set_xlabel("Wavelength (nm)")
     ax.set_ylabel("R, T (%)")
     ax.set_ylim(-2, 105)

@@ -29,6 +29,23 @@ from rt_calculator import make_calculator, material_index
 # Default materials available without extra files (also listed in dispersion.MATERIALS).
 DEFAULT_MATERIALS = ("air", "sio2", "tio2", "glass")
 
+# Light pastel fills for shading wavelength bands on R/T plots (cycled by index).
+BAND_BG_COLORS = (
+    "#cfe8ff",  # soft blue
+    "#ffe4cc",  # soft peach
+    "#d4f0d4",  # soft green
+    "#f0e0ff",  # soft lavender
+    "#fff3c4",  # soft yellow
+    "#ffd6e0",  # soft pink
+    "#d0f5f0",  # soft teal
+    "#e8e4d8",  # soft sand
+)
+
+
+def band_bg_color(index: int) -> str:
+    """Pastel background colour for band ``index`` (0-based)."""
+    return BAND_BG_COLORS[index % len(BAND_BG_COLORS)]
+
 
 def _nm(x: float) -> float:
     return x * 1e-9
@@ -190,8 +207,15 @@ def plot_results(
     ax.plot(wl_nm, [100 * r for r in R_after], "-", color="C0", label="R after")
     ax.plot(wl_nm, [100 * t for t in T_before], "--", color="C1", label="T before")
     ax.plot(wl_nm, [100 * t for t in T_after], "-", color="C1", label="T after")
-    for b in bands:
-        ax.axvspan(b.wl_lo * 1e9, b.wl_hi * 1e9, color="0.85", alpha=0.35, lw=0)
+    for i, b in enumerate(bands):
+        ax.axvspan(
+            b.wl_lo * 1e9,
+            b.wl_hi * 1e9,
+            color=band_bg_color(i),
+            alpha=0.45,
+            lw=0,
+            zorder=0,
+        )
         if b.R_min is not None:
             ax.hlines(
                 100 * b.R_min,
