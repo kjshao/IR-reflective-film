@@ -538,6 +538,7 @@ def make_optimizer_from_config(
         global_seed=cfg.get("global_seed"),
         global_polish=bool(cfg.get("global_polish", True)),
         global_polish_lm=bool(cfg.get("global_polish_lm", False)),
+        global_polish_method=cfg.get("global_polish_method"),
         da_initial_temp=float(cfg.get("da_initial_temp", 5230.0)),
         da_visit=float(cfg.get("da_visit", 2.62)),
         da_accept=float(cfg.get("da_accept", -5.0)),

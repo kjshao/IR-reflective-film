@@ -47,6 +47,36 @@ class OptimResult:
     history: list[float] = field(default_factory=list)
     # Iteration index (0 = start) at which ``cost`` / ``layers`` were best.
     best_iter: int = 0
+    # For DE/DA + local polish: the global-stage result before LM/Adam.
+    pre_polish: OptimResult | None = None
+
+
+def resolve_global_polish_method(
+    method: str | None = None,
+    *,
+    global_polish_lm: bool | None = None,
+) -> str:
+    """Return ``none`` | ``lm`` | ``adam`` for post-global local polish."""
+    if method is not None and str(method).strip() != "":
+        m = str(method).lower().strip()
+        aliases = {
+            "none": "none",
+            "off": "none",
+            "false": "none",
+            "0": "none",
+            "lm": "lm",
+            "levenberg": "lm",
+            "levenberg-marquardt": "lm",
+            "adam": "adam",
+        }
+        if m not in aliases:
+            raise ValueError(
+                f"unknown global_polish_method {method!r}; use none|lm|adam"
+            )
+        return aliases[m]
+    if global_polish_lm:
+        return "lm"
+    return "none"
 
 
 def _bounds_for(mat: str) -> tuple[float, float]:
@@ -299,6 +329,7 @@ class LMThicknessOptimizer:
         global_seed: int | None = None,
         global_polish: bool = True,
         global_polish_lm: bool = False,
+        global_polish_method: str | None = None,
         da_initial_temp: float = 5230.0,
         da_visit: float = 2.62,
         da_accept: float = -5.0,
@@ -339,7 +370,12 @@ class LMThicknessOptimizer:
         self.de_recombination = float(de_recombination)
         self.global_seed = global_seed
         self.global_polish = bool(global_polish)
-        self.global_polish_lm = bool(global_polish_lm)
+        self.global_polish_method = resolve_global_polish_method(
+            global_polish_method,
+            global_polish_lm=global_polish_lm,
+        )
+        # Back-compat mirror of the resolved method.
+        self.global_polish_lm = self.global_polish_method == "lm"
         self.da_initial_temp = float(da_initial_temp)
         self.da_visit = float(da_visit)
         self.da_accept = float(da_accept)
@@ -649,7 +685,7 @@ class LMThicknessOptimizer:
             _sum_nm,
         )
 
-    def _maybe_polish_lm(
+    def _maybe_local_polish(
         self,
         layers: Sequence[tuple[str, float]],
         *,
@@ -658,37 +694,67 @@ class LMThicknessOptimizer:
         verbose: bool,
         label: str,
     ) -> OptimResult:
-        if not self.global_polish_lm:
-            cost = self.cost(layers)
-            best_iter = (
-                min(range(len(history)), key=lambda i: history[i]) if history else 0
-            )
-            return OptimResult(
-                list(layers),
-                cost,
-                self.residuals(layers),
-                max(0, len(history) - 1),
-                True,
-                label,
-                history,
-                best_iter=best_iter,
-            )
-        if verbose:
-            print(f"    {label}: LM polish …", flush=True)
-        polished = self._optimize_lm(
-            layers, free_indices=free_indices, verbose=verbose
+        """Attach optional LM/Adam polish after a global (DE/DA) search."""
+        cost = self.cost(layers)
+        best_iter = (
+            min(range(len(history)), key=lambda i: history[i]) if history else 0
         )
+        global_result = OptimResult(
+            list(layers),
+            cost,
+            self.residuals(layers),
+            max(0, len(history) - 1),
+            True,
+            label,
+            list(history),
+            best_iter=best_iter,
+        )
+        polish = self.global_polish_method
+        if polish == "none":
+            return global_result
+
+        if verbose:
+            print(
+                f"    {label}: local polish with {polish.upper()} …",
+                flush=True,
+            )
+        if polish == "lm":
+            polished = self._optimize_lm(
+                layers, free_indices=free_indices, verbose=verbose
+            )
+        elif polish == "adam":
+            # Full-grid Adam polish (ignore mini-batch settings).
+            saved_mb = self.mini_batch
+            self.mini_batch = False
+            try:
+                polished = self._optimize_adam(
+                    layers, free_indices=free_indices, verbose=verbose
+                )
+            finally:
+                self.mini_batch = saved_mb
+        else:
+            raise ValueError(f"internal: bad polish method {polish!r}")
+
         merged = list(history) + list(polished.history[1:])
-        best_iter = min(range(len(merged)), key=lambda i: merged[i])
+        merged_best_iter = min(range(len(merged)), key=lambda i: merged[i])
+        if verbose:
+            print(
+                f"    {label}+{polish}: "
+                f"global_cost={global_result.cost:.6e} → "
+                f"polished_cost={polished.cost:.6e}  "
+                f"Δ={polished.cost - global_result.cost:+.3e}",
+                flush=True,
+            )
         return OptimResult(
             polished.layers,
             polished.cost,
             polished.residuals,
             polished.n_iter + max(0, len(history) - 1),
             polished.success,
-            f"{label}+lm",
+            f"{label}+{polish}",
             merged,
-            best_iter=best_iter,
+            best_iter=merged_best_iter,
+            pre_polish=global_result,
         )
 
     def _optimize_differential_evolution(
@@ -805,7 +871,7 @@ class LMThicknessOptimizer:
                 f"msg={result.message}",
                 flush=True,
             )
-        return self._maybe_polish_lm(
+        return self._maybe_local_polish(
             layers_best,
             free_indices=free_indices,
             history=history,
@@ -919,7 +985,7 @@ class LMThicknessOptimizer:
                 f"msg={result.message}",
                 flush=True,
             )
-        return self._maybe_polish_lm(
+        return self._maybe_local_polish(
             layers_best,
             free_indices=free_indices,
             history=history,

@@ -378,6 +378,7 @@ def run(cfg: dict, input_path: str) -> int:
         "global_seed": opt_cfg.get("global_seed"),
         "global_polish": bool(opt_cfg.get("global_polish", True)),
         "global_polish_lm": bool(opt_cfg.get("global_polish_lm", False)),
+        "global_polish_method": opt_cfg.get("global_polish_method"),
         "da_initial_temp": float(opt_cfg.get("da_initial_temp", 5230.0)),
         "da_visit": float(opt_cfg.get("da_visit", 2.62)),
         "da_accept": float(opt_cfg.get("da_accept", -5.0)),
@@ -418,6 +419,7 @@ def run(cfg: dict, input_path: str) -> int:
     print_report("Before optimisation", layers0, report0, ok0)
 
     use_needle = bool(opt_cfg.get("use_needle", True))
+    opt_result = None
     if use_needle:
         synth = NeedleSynthesizer(
             optimizer,
@@ -435,12 +437,33 @@ def run(cfg: dict, input_path: str) -> int:
         ok1 = result.specs_ok
         report1 = result.report
     else:
-        print(f"  {lm_kwargs['method'].upper()} thickness optimisation only (fixed layer count)")
-        lm = optimizer.optimize(layers0, verbose=True)
-        layers1 = lm.layers
+        polish = optimizer.global_polish_method
+        print(
+            f"  {lm_kwargs['method'].upper()} thickness optimisation only "
+            f"(fixed layer count; local polish={polish})",
+            flush=True,
+        )
+        opt_result = optimizer.optimize(layers0, verbose=True)
+        layers1 = opt_result.layers
         _, _, ok1, report1 = optimizer.evaluate(layers1)
 
+    if opt_result is not None and opt_result.pre_polish is not None:
+        g = opt_result.pre_polish
+        _, _, ok_g, report_g = optimizer.evaluate(g.layers)
+        print_report(
+            f"After global search ({g.message})",
+            g.layers,
+            report_g,
+            ok_g,
+        )
+        print(f"  global cost={g.cost:.6e}", flush=True)
+
     print_report("After optimisation", layers1, report1, ok1)
+    if opt_result is not None:
+        print(
+            f"  final cost={opt_result.cost:.6e}  msg={opt_result.message}",
+            flush=True,
+        )
 
     R1, T1 = calc.spectrum(layers1, plot_wls, theta0, **rt_kw)
 
@@ -450,16 +473,72 @@ def run(cfg: dict, input_path: str) -> int:
     plot_path = os.path.join(out_dir, "rt_and_n_before_after.png")
 
     write_spectrum_csv(csv_path, plot_wls, R0, T0, R1, T1)
+
+    base_meta = {
+        "input": os.path.abspath(input_path),
+        "incident_angle_deg": angle_deg,
+        "rt_engine": cfg.get("rt_engine", "tmm"),
+        "method": lm_kwargs["method"],
+        "global_polish_method": optimizer.global_polish_method,
+    }
     write_stack_json(
         stack_path,
         layers1,
         {
-            "input": os.path.abspath(input_path),
-            "incident_angle_deg": angle_deg,
+            **base_meta,
+            "stage": "polished" if (opt_result and opt_result.pre_polish) else "final",
             "specs_satisfied": ok1,
-            "rt_engine": cfg.get("rt_engine", "tmm"),
+            "cost": opt_result.cost if opt_result is not None else None,
+            "message": opt_result.message if opt_result is not None else None,
         },
     )
+
+    if opt_result is not None and opt_result.pre_polish is not None:
+        g = opt_result.pre_polish
+        _, _, ok_g, _ = optimizer.evaluate(g.layers)
+        Rg, Tg = calc.spectrum(g.layers, plot_wls, theta0, **rt_kw)
+        global_stack = os.path.join(out_dir, "stack_global.json")
+        polished_stack = os.path.join(out_dir, "stack_polished.json")
+        global_csv = os.path.join(out_dir, "spectrum_global.csv")
+        write_stack_json(
+            global_stack,
+            g.layers,
+            {
+                **base_meta,
+                "stage": "global",
+                "specs_satisfied": ok_g,
+                "cost": g.cost,
+                "message": g.message,
+            },
+        )
+        write_stack_json(
+            polished_stack,
+            layers1,
+            {
+                **base_meta,
+                "stage": "polished",
+                "specs_satisfied": ok1,
+                "cost": opt_result.cost,
+                "message": opt_result.message,
+                "global_cost": g.cost,
+            },
+        )
+        with open(global_csv, "w", encoding="utf-8") as fh:
+            fh.write(
+                "wavelength_nm,R_before,T_before,R_global,T_global,"
+                "R_polished,T_polished\n"
+            )
+            for wl, rb, tb, rg, tg, ra, ta in zip(
+                plot_wls, R0, T0, Rg, Tg, R1, T1
+            ):
+                fh.write(
+                    f"{wl * 1e9:.2f},{rb:.6f},{tb:.6f},"
+                    f"{rg:.6f},{tg:.6f},{ra:.6f},{ta:.6f}\n"
+                )
+        print(f"\n  wrote {global_stack}")
+        print(f"  wrote {polished_stack}")
+        print(f"  wrote {global_csv}")
+
     mats = []
     for m, _ in layers1:
         if m not in mats:

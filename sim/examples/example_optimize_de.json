@@ -32,7 +32,7 @@
       "weight": 1.0
     }
   ],
-  "optimizer": {
+    "optimizer": {
     "method": "de",
     "use_needle": false,
     "thickness_weight": 0.01,
@@ -43,7 +43,7 @@
     "de_recombination": 0.7,
     "global_seed": 0,
     "global_polish": true,
-    "global_polish_lm": false,
+    "global_polish_method": "lm",
     "fd_step_nm": 1.0,
     "lambda0": 0.01
   },

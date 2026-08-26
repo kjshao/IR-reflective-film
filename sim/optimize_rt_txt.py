@@ -629,6 +629,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         ),
         global_polish=bool(cfg.get("global_polish", True)),
         global_polish_lm=bool(cfg.get("global_polish_lm", False)),
+        global_polish_method=cfg.get("global_polish_method"),
         da_initial_temp=float(cfg.get("da_initial_temp", 5230.0)),
         da_visit=float(cfg.get("da_visit", 2.62)),
         da_accept=float(cfg.get("da_accept", -5.0)),
@@ -698,6 +699,16 @@ def run(stack_path: str, cfg_path: str) -> int:
         substrate=substrate.material,
         polarization=pol,
     )
+    if result.pre_polish is not None:
+        g = result.pre_polish
+        print_band_report(
+            f"After global ({g.message})",
+            g.layers,
+            rbands,
+            opt.wavelengths,
+            opt._rt(g.layers)[0],
+        )
+        print(f"  global MSE={g.cost:.6e}", flush=True)
     print_band_report(
         f"Best MSE ({'epoch' if opt.mini_batch else 'iter'} {best_iter})",
         layers_best,
@@ -757,7 +768,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         header_lines=[
             f"# best-MSE stack  method={method}  "
             f"mse={best_cost:.12e}  best_iter={best_iter}  "
-            f"n_iter={result.n_iter}",
+            f"n_iter={result.n_iter}  msg={result.message}",
             "# incident and substrate thicknesses fixed (not optimised)",
             "# R_target: minimize bands → 0, maximize bands → 1",
         ],
@@ -776,6 +787,57 @@ def run(stack_path: str, cfg_path: str) -> int:
             "# incident and substrate thicknesses fixed (not optimised)",
         ],
     )
+    if result.pre_polish is not None:
+        g = result.pre_polish
+        Rg, Tg = calc.spectrum(
+            g.layers,
+            plot_wls,
+            theta0,
+            incident=incident.material,
+            substrate=substrate.material,
+            polarization=pol,
+        )
+        write_stack_txt(
+            os.path.join(out_dir, "stack_global.txt"),
+            incident,
+            g.layers,
+            substrate,
+            nk,
+            film_indices=film_indices,
+            header_lines=[
+                f"# global-stage stack  method={method}  "
+                f"mse={g.cost:.12e}  msg={g.message}",
+                "# before local polish (lm/adam)",
+            ],
+        )
+        write_stack_txt(
+            os.path.join(out_dir, "stack_polished.txt"),
+            incident,
+            layers_best,
+            substrate,
+            nk,
+            film_indices=film_indices,
+            header_lines=[
+                f"# polished stack  method={result.message}  "
+                f"mse={best_cost:.12e}  global_mse={g.cost:.12e}",
+                "# after local polish",
+            ],
+        )
+        with open(os.path.join(out_dir, "spectrum_global.csv"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "wavelength_nm,R_before,T_before,R_global,T_global,"
+                "R_polished,T_polished\n"
+            )
+            for wl, rb, tb, rg, tg, ra, ta in zip(
+                plot_wls, R0, T0, Rg, Tg, R1, T1
+            ):
+                fh.write(
+                    f"{wl / _NM:.2f},{rb:.6f},{tb:.6f},"
+                    f"{rg:.6f},{tg:.6f},{ra:.6f},{ta:.6f}\n"
+                )
+        print(f"  wrote {os.path.join(out_dir, 'stack_global.txt')}")
+        print(f"  wrote {os.path.join(out_dir, 'stack_polished.txt')}")
+        print(f"  wrote {os.path.join(out_dir, 'spectrum_global.csv')}")
     if opt.mini_batch:
         write_loss_history_epochs(loss_path, result.history, best_iter)
     else:

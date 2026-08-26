@@ -106,7 +106,8 @@ sim/
 
 要点：
 
-- **`optimizer.method`**：局部 `lm` / `adam`；全局（需 scipy）`de`（differential evolution）或 `dual_annealing`。全局可调 `de_popsize`、`global_seed`、`global_polish`、`global_polish_lm` 等。  
+- **`optimizer.method`**：局部 `lm` / `adam`；全局（需 scipy）`de`（differential evolution）或 `dual_annealing`。全局可调 `de_popsize`、`global_seed`、`global_polish` 等。  
+- **`global_polish_method`**：全局搜索后再局部精修，`none` / `lm` / `adam`（兼容旧字段 `global_polish_lm: true` → `lm`）。开启后会同时写出 `stack_global.json`（DE/DA）与 `stack_polished.json`（精修后；`stack_optimised.json` 同精修结果）。  
 - **`layers` 与 `seed`**：有 `layers` 则用给定膜系；否则可用 `seed` 生成啁啾 1/4 波长堆；都没有则用简单单周期种子。  
 - **`bands`**：每段可设 `R_min` / `R_max` / `T_min` / `T_max`，以及可选的连续目标 `R_target` / `T_target`。  
 - **`substrate_model`**：`semi_infinite`（镀膜设计默认，忽略厚基底背面）或 `incoherent_slab`（含非相干基底双面）。含背面时，可见光 R≤2% 往往物理上很难达到。  
