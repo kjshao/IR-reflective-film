@@ -579,6 +579,9 @@ class LMThicknessOptimizer:
         self,
         layers: Sequence[tuple[str, float]],
         free_indices: Sequence[int] | None,
+        *,
+        verbose: bool = False,
+        tag: str = "global",
     ):
         """Shared scaffolding for scipy global methods on free thicknesses."""
         materials = [m for m, _ in layers]
@@ -595,7 +598,12 @@ class LMThicknessOptimizer:
             "x": list(x0_full),
             "cost": start_cost,
             "n_eval": 0,
+            "n_improve": 0,
         }
+        progress = {"last_heartbeat": 0}
+
+        def _sum_nm(x_vals: Sequence[float]) -> float:
+            return sum(x_vals) * 1e9
 
         def objective(x_free) -> float:
             x = list(x0_full)
@@ -607,10 +615,39 @@ class LMThicknessOptimizer:
             if c < best["cost"] - 1e-15:
                 best["cost"] = c
                 best["x"] = list(x)
+                best["n_improve"] += 1
                 history.append(c)
+                if verbose:
+                    print(
+                        f"    {tag} eval {best['n_eval']:5d}: "
+                        f"NEW best={c:.6e}  "
+                        f"Δ={c - start_cost:+.3e}  "
+                        f"Σd={_sum_nm(x):.1f} nm  "
+                        f"improves={best['n_improve']}",
+                        flush=True,
+                    )
+            elif verbose and best["n_eval"] - progress["last_heartbeat"] >= 50:
+                progress["last_heartbeat"] = best["n_eval"]
+                print(
+                    f"    {tag} eval {best['n_eval']:5d}: "
+                    f"cost={c:.6e}  best={best['cost']:.6e}  "
+                    f"Σd_best={_sum_nm(best['x']):.1f} nm",
+                    flush=True,
+                )
             return c
 
-        return materials, x0_full, free, bounds, x0_free, start_cost, history, best, objective
+        return (
+            materials,
+            x0_full,
+            free,
+            bounds,
+            x0_free,
+            start_cost,
+            history,
+            best,
+            objective,
+            _sum_nm,
+        )
 
     def _maybe_polish_lm(
         self,
@@ -673,13 +710,25 @@ class LMThicknessOptimizer:
             history,
             best,
             objective,
-        ) = self._global_objective_setup(layers, free_indices)
+            sum_nm,
+        ) = self._global_objective_setup(
+            layers, free_indices, verbose=verbose, tag="DE"
+        )
 
+        n_pop = max(5, self.de_popsize * len(free))
         if verbose:
             print(
                 f"    DE start: cost={start_cost:.6e}  layers={len(materials)}  "
-                f"free={len(free)}  popsize={self.de_popsize}  "
-                f"maxiter={self.max_iter}",
+                f"free={len(free)}  popsize={self.de_popsize} "
+                f"(~{n_pop} individuals)  maxiter={self.max_iter}  "
+                f"mutation={self.de_mutation}  recom={self.de_recombination}  "
+                f"polish={self.global_polish}  seed={self.global_seed}",
+                flush=True,
+            )
+            print(
+                f"    DE start: Σd={sum_nm(_x0_full):.1f} nm  "
+                f"free thicknesses (nm) = "
+                f"{[round(x0_free[i] * 1e9, 2) for i in range(len(free))]}",
                 flush=True,
             )
 
@@ -690,18 +739,26 @@ class LMThicknessOptimizer:
             if hasattr(intermediate_result, "fun"):
                 fun = float(intermediate_result.fun)
                 gen = int(getattr(intermediate_result, "nit", 0))
+                conv = getattr(intermediate_result, "convergence", convergence)
             else:
                 fun = best["cost"]
-                gen = max(0, len(history) - 1)
+                gen = last_logged_gen["g"] + 1
+                conv = convergence
             if gen == last_logged_gen["g"]:
-                return
+                return False
             last_logged_gen["g"] = gen
-            if verbose and (gen <= 1 or gen % 5 == 0 or gen == self.max_iter):
-                print(
-                    f"    DE gen {gen:3d}: cost={fun:.6e}  "
-                    f"best={best['cost']:.6e}  evals={best['n_eval']}",
-                    flush=True,
-                )
+            if not verbose:
+                return False
+            conv_s = f"{float(conv):.3e}" if conv is not None else "n/a"
+            print(
+                f"    DE gen {gen:3d}/{self.max_iter}: "
+                f"pop_best={fun:.6e}  best={best['cost']:.6e}  "
+                f"Δ={best['cost'] - start_cost:+.3e}  "
+                f"evals={best['n_eval']}  improves={best['n_improve']}  "
+                f"Σd={sum_nm(best['x']):.1f} nm  conv={conv_s}",
+                flush=True,
+            )
+            return False
 
         result = spo.differential_evolution(
             objective,
@@ -725,15 +782,26 @@ class LMThicknessOptimizer:
         for k, j in enumerate(free):
             x[j] = float(result.x[k])
         x = self._project(materials, x)
+        result_cost = self.cost(list(zip(materials, x)))
+        # Prefer the best point seen during search (polish can move off it).
+        if best["cost"] <= result_cost + 1e-15:
+            x = list(best["x"])
         layers_best = list(zip(materials, x))
-        # Ensure final point is recorded even if polish moved off the tracked best.
         final_cost = self.cost(layers_best)
-        if final_cost < best["cost"] - 1e-15 or not history:
+        if abs(final_cost - history[-1]) > 1e-15:
             history.append(final_cost)
         if verbose:
+            free_nm = [round(x[j] * 1e9, 2) for j in free]
             print(
                 f"    DE done: cost={final_cost:.6e}  "
-                f"success={bool(result.success)}  evals={best['n_eval']}  "
+                f"Δ={final_cost - start_cost:+.3e}  "
+                f"success={bool(result.success)}  "
+                f"evals={best['n_eval']}  improves={best['n_improve']}  "
+                f"Σd={sum_nm(x):.1f} nm",
+                flush=True,
+            )
+            print(
+                f"    DE done: free thicknesses (nm) = {free_nm}  "
                 f"msg={result.message}",
                 flush=True,
             )
@@ -764,29 +832,52 @@ class LMThicknessOptimizer:
             history,
             best,
             objective,
-        ) = self._global_objective_setup(layers, free_indices)
+            sum_nm,
+        ) = self._global_objective_setup(
+            layers, free_indices, verbose=verbose, tag="DA"
+        )
 
+        context_name = {0: "accept", 1: "local", 2: "step_done"}
         if verbose:
             print(
-                f"    dual_annealing start: cost={start_cost:.6e}  "
-                f"layers={len(materials)}  free={len(free)}  "
-                f"maxiter={self.max_iter}",
+                f"    DA start: cost={start_cost:.6e}  layers={len(materials)}  "
+                f"free={len(free)}  maxiter={self.max_iter}  "
+                f"T0={self.da_initial_temp:g}  visit={self.da_visit:g}  "
+                f"accept={self.da_accept:g}  "
+                f"local_search={self.global_polish}  seed={self.global_seed}",
+                flush=True,
+            )
+            print(
+                f"    DA start: Σd={sum_nm(_x0_full):.1f} nm  "
+                f"free thicknesses (nm) = "
+                f"{[round(x0_free[i] * 1e9, 2) for i in range(len(free))]}",
                 flush=True,
             )
 
-        last_log = {"n": 0}
+        step_count = {"n": 0}
 
         def callback(x_free, f, context):
-            # context: 0=acceptance, 1=local search, 2=both finished steps
-            if verbose and (
-                best["n_eval"] - last_log["n"] >= 20 or context == 2
-            ):
-                last_log["n"] = best["n_eval"]
-                print(
-                    f"    DA evals={best['n_eval']:4d}: f={f:.6e}  "
-                    f"best={best['cost']:.6e}  context={context}",
-                    flush=True,
-                )
+            # context: 0=acceptance, 1=local search, 2=strategy step finished
+            step_count["n"] += 1
+            if not verbose:
+                return False
+            name = context_name.get(int(context), str(context))
+            # Log every accept/local and every few finished steps.
+            if int(context) == 2 and step_count["n"] % 3 != 0:
+                return False
+            x_tmp = list(_x0_full)
+            for k, j in enumerate(free):
+                x_tmp[j] = float(x_free[k])
+            x_tmp = self._project(materials, x_tmp)
+            print(
+                f"    DA step {step_count['n']:4d} [{name:9s}]: "
+                f"f={float(f):.6e}  best={best['cost']:.6e}  "
+                f"Δ={best['cost'] - start_cost:+.3e}  "
+                f"evals={best['n_eval']}  improves={best['n_improve']}  "
+                f"Σd={sum_nm(best['x']):.1f} nm  "
+                f"Σd_cur={sum_nm(x_tmp):.1f} nm",
+                flush=True,
+            )
             return False  # continue
 
         kw = dict(
@@ -806,14 +897,25 @@ class LMThicknessOptimizer:
         for k, j in enumerate(free):
             x[j] = float(result.x[k])
         x = self._project(materials, x)
+        result_cost = self.cost(list(zip(materials, x)))
+        if best["cost"] <= result_cost + 1e-15:
+            x = list(best["x"])
         layers_best = list(zip(materials, x))
         final_cost = self.cost(layers_best)
-        if final_cost < best["cost"] - 1e-15 or history[-1] != final_cost:
+        if abs(final_cost - history[-1]) > 1e-15:
             history.append(final_cost)
         if verbose:
+            free_nm = [round(x[j] * 1e9, 2) for j in free]
             print(
-                f"    dual_annealing done: cost={final_cost:.6e}  "
-                f"success={bool(result.success)}  evals={best['n_eval']}  "
+                f"    DA done: cost={final_cost:.6e}  "
+                f"Δ={final_cost - start_cost:+.3e}  "
+                f"success={bool(result.success)}  "
+                f"evals={best['n_eval']}  improves={best['n_improve']}  "
+                f"Σd={sum_nm(x):.1f} nm  steps={step_count['n']}",
+                flush=True,
+            )
+            print(
+                f"    DA done: free thicknesses (nm) = {free_nm}  "
                 f"msg={result.message}",
                 flush=True,
             )
