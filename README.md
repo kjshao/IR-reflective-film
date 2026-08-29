@@ -6,6 +6,7 @@
 
 - [IR 反射膜制备方案、结构与仿真指南](docs/IR-reflective-film-overview.md) — 涵盖 DMD、全介质膜堆、聚合物 MOF 等常见制备路线，以及 TMM / RCWA / FDTD 仿真流程；说明 TFCalc 基于 TMM、与全波求解的区别及是否需要全波。文中缩略词均给出中英文全称，并附分类对照表。
 - [OghmaNano 红外反射膜仿真实操](docs/oghmanano-ir-film-simulation.md) — 以 400–700 nm 透射、700–1300 nm 反射为目标，给出 OMOMO 起始膜系、软件设置、材料导入、参数扫描和可复现的角度谱结果。
+- [光学薄膜层数与厚度联合优化算法设计](docs/film-optimization-algorithm.md) — 多波段 R/T 目标的混合优化架构：Needle 外层（层数）+ LM/Adam 中层（厚度）+ TMM 内层（光谱），含残差构造、分阶段合成与整合路线。
 
 ## 可复现仿真
 

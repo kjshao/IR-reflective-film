@@ -127,4 +127,4 @@ python3 sim/design.py
 
 ## 与文档的关系
 
-项目级说明见仓库根目录 [README.md](../README.md) 与 `docs/`。本程序侧重**可脚本化的膜系厚度自动设计**；OghmaNano 等 GUI 仿真实操见 `docs/oghmanano-ir-film-simulation.md`。
+项目级说明见仓库根目录 [README.md](../README.md) 与 `docs/`。算法设计详见 [光学薄膜层数与厚度联合优化算法设计](../docs/film-optimization-algorithm.md)。本程序侧重**可脚本化的膜系厚度/层数自动设计**；OghmaNano 等 GUI 仿真实操见 `docs/oghmanano-ir-film-simulation.md`。
