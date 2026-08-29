@@ -1,6 +1,6 @@
 # 光学薄膜层数与厚度联合优化算法设计
 
-本文档描述如何同时优化**膜层数量**与**各层厚度**，使反射率 \(R(\lambda)\) 与透射率 \(T(\lambda)\) 满足多波段目标。算法面向本仓库 `sim/` 下的 TMM 仿真与优化模块，并与现有代码对应。
+本文档描述如何同时优化**膜层数量**与**各层厚度**，使反射率 $R(\lambda)$ 与透射率 $T(\lambda)$ 满足多波段目标。算法面向本仓库 `sim/` 下的 TMM 仿真与优化模块，并与现有代码对应。
 
 **相关代码**
 
@@ -19,69 +19,69 @@
 
 ### 1.1 设计变量
 
-给定入射角 \(\theta\)、偏振态、基底与可选材料库 \(\mathcal{M}\)（如 TiO₂ / SiO₂），设计变量为：
+给定入射角 $\theta$、偏振态、基底与可选材料库 $\mathcal{M}$（如 TiO₂ / SiO₂），设计变量为：
 
-\[
+$$
 \text{设计} = \bigl( N,\; (m_1,d_1),\ldots,(m_N,d_N) \bigr)
-\]
+$$
 
-- \(N\)：镀膜层数（**离散**）
-- \(m_i \in \mathcal{M}\)：第 \(i\) 层材料（**离散**）
-- \(d_i \in [d_{\min}(m_i),\, d_{\max}(m_i)]\)：物理厚度（**连续**，单位 m）
+- $N$：镀膜层数（**离散**）
+- $m_i \in \mathcal{M}$：第 $i$ 层材料（**离散**）
+- $d_i \in [d_{\min}(m_i),\, d_{\max}(m_i)]$：物理厚度（**连续**，单位 m）
 
 入射介质与基底厚度通常固定，不参与优化。
 
 ### 1.2 前向模型
 
-对每个波长 \(\lambda\)，用 TMM 计算：
+对每个波长 $\lambda$，用 TMM 计算：
 
-\[
+$$
 R(\lambda),\; T(\lambda) = \mathrm{TMM}\bigl(\theta,\, \text{stack},\, \lambda\bigr)
-\]
+$$
 
-材料折射率 \(N(\lambda)=n+ik\) 可来自色散库（`dispersion.py`）或文本栈中的常数 \(n,k\)。
+材料折射率 $N(\lambda)=n+\mathrm{i}k$ 可来自色散库（`dispersion.py`）或文本栈中的常数 $n,k$。
 
 ### 1.3 波段目标
 
-每个波段 \(b\) 在 \([\lambda_{b,\mathrm{lo}}, \lambda_{b,\mathrm{hi}}]\) 上定义：
+每个波段 $b$ 在 $[\lambda_{b,\mathrm{lo}},\, \lambda_{b,\mathrm{hi}}]$ 上定义：
 
 | 类型 | 含义 | 示例 |
 |------|------|------|
-| 不等式 | \(R \ge R_{\min}\)、\(R \le R_{\max}\)、\(T \ge T_{\min}\)、\(T \le T_{\max}\) | 可见高透、红外高反 |
-| 点目标 | \(R \to R^\*\)、\(T \to T^\*\) | 连续拟合 |
-| 极值 | 最大化 / 最小化 \(R\) | `optimize_film.py` 的 `objective: maximize\|minimize` |
+| 不等式 | $R \ge R_{\min}$、$R \le R_{\max}$、$T \ge T_{\min}$、$T \le T_{\max}$ | 可见高透、红外高反 |
+| 点目标 | $R \to R^{*}$、$T \to T^{*}$ | 连续拟合 |
+| 极值 | 最大化 / 最小化 $R$ | `optimize_film.py` 的 `objective: maximize\|minimize` |
 
-每波段可有权重 \(w_b > 0\)。
+每波段可有权重 $w_b > 0$。
 
 ### 1.4 目标函数
 
 综合损失（越小越好）：
 
-\[
+$$
 L = L_{\mathrm{spec}} + \lambda_d L_{\mathrm{thick}} + \lambda_s L_{\mathrm{smooth}} + \lambda_r L_{\mathrm{ripple}}
-\]
+$$
 
 **光谱项**（推荐波段归一化，与采样点数无关）：
 
-\[
+$$
 L_{\mathrm{spec}} = \frac{\sum_b w_b \cdot \mathrm{mean}_{\lambda \in b}\, \phi_b(R,T)}{\sum_b w_b}
-\]
+$$
 
 **厚度正则**（压薄）：
 
-\[
+$$
 L_{\mathrm{thick}} = \left(\frac{\sum_i d_i}{d_{\mathrm{ref}}}\right)^2
-\]
+$$
 
 **可选纹波抑制**（见 `optimize_film.py`）：
 
-- \(L_{\mathrm{smooth}}\)：波段内相邻波长 \(\Delta R\) 的均方
-- \(L_{\mathrm{ripple}}\)：波段内 \((R_{\max}-R_{\min})^2\)
+- $L_{\mathrm{smooth}}$：波段内相邻波长 $\Delta R$ 的均方
+- $L_{\mathrm{ripple}}$：波段内 $(R_{\max}-R_{\min})^2$
 
 ### 1.5 约束
 
-- 最大层数 \(N \le N_{\max}\)
-- 最大总厚度 \(\sum_i d_i \le D_{\max}\)
+- 最大层数 $N \le N_{\max}$
+- 最大总厚度 $\sum_i d_i \le D_{\max}$
 - 可选：相邻层材料不得相同；仅允许 H/L 交替
 - 工艺厚度上下界（`lm_optimizer.DEFAULT_BOUNDS`）
 
@@ -91,7 +91,7 @@ L_{\mathrm{thick}} = \left(\frac{\sum_i d_i}{d_{\mathrm{ref}}}\right)^2
 
 - 层数、材料序列 → 离散，决策空间不连续
 - 厚度 → 连续，但随拓扑跳变
-- \(L\) 多局部极小，无全局最优保证
+- $L$ 多局部极小，无全局最优保证
 
 因此采用**分层 / 分阶段**启发式，而非单一黑盒求解器。
 
@@ -138,37 +138,50 @@ L_{\mathrm{thick}} = \left(\frac{\sum_i d_i}{d_{\mathrm{ref}}}\right)^2
 
 ## 3. 残差构造（光谱目标 → 可优化量）
 
-`lm_optimizer.build_residuals` 将光谱目标转为残差向量 \(\mathbf{r}\)，最小化 \(\frac{1}{2}\|\mathbf{r}\|^2\)。
+`lm_optimizer.build_residuals` 将光谱目标转为残差向量 $\mathbf{r}$，最小化
 
-对每个波段 \(b\)、每个采样波长 \(\lambda\)：
+$$
+\frac{1}{2}\,\lVert \mathbf{r} \rVert^2
+$$
 
-```
-若 R < R_min  →  r += √w · (R_min - R)
-若 R > R_max  →  r += √w · (R - R_max)
-若 T < T_min  →  r += √w · (T_min - T)
-若 T > T_max  →  r += √w · (T - T_max)
-若已达标且有 R_target →  r += √w' · (R - R_target)
-若已达标且有 T_target →  r += √w' · (T - T_target)
-```
+对每个波段 $b$、每个采样波长 $\lambda$：
+
+$$
+\begin{aligned}
+R < R_{\min} &\Rightarrow r \mathrel{+}= \sqrt{w}\,(R_{\min} - R) \\
+R > R_{\max} &\Rightarrow r \mathrel{+}= \sqrt{w}\,(R - R_{\max}) \\
+T < T_{\min} &\Rightarrow r \mathrel{+}= \sqrt{w}\,(T_{\min} - T) \\
+T > T_{\max} &\Rightarrow r \mathrel{+}= \sqrt{w}\,(T - T_{\max})
+\end{aligned}
+$$
+
+若已达标且存在连续目标：
+
+$$
+\begin{aligned}
+R_{\mathrm{target}} \text{ 已设} &\Rightarrow r \mathrel{+}= \sqrt{w'}\,(R - R_{\mathrm{target}}) \\
+T_{\mathrm{target}} \text{ 已设} &\Rightarrow r \mathrel{+}= \sqrt{w'}\,(T - T_{\mathrm{target}})
+\end{aligned}
+$$
 
 **设计要点**
 
 1. **可行性优先**：未达标时主要惩罚违反量；达标后再加强连续目标，避免已满足波段被压垮。
-2. **波段归一化**：每波段先取均值再加权（`optimize_film.reflectance_mse`），使 \(w_b\) 与波段内采样点数无关。
-3. **厚度项**：\(\sqrt{2\lambda_d}\cdot\sum_i d_i/d_{\mathrm{ref}}\) 作为额外残差分量。
+2. **波段归一化**：每波段先取均值再加权（`optimize_film.reflectance_mse`），使 $w_b$ 与波段内采样点数无关。
+3. **厚度项**：$\sqrt{2\lambda_d}\cdot\sum_i d_i/d_{\mathrm{ref}}$ 作为额外残差分量。
 
 **极值目标映射**（文本栈优化器）：
 
-| `objective` | 目标 \(t_b\) | 等价 BandSpec |
+| `objective` | 目标 $t_b$ | 等价 BandSpec |
 |-------------|-------------|---------------|
-| `maximize` | \(R \to 1\) | `R_min=0.9, R_target=1` |
-| `minimize` | \(R \to 0\) | `R_max=0.1, R_target=0` |
+| `maximize` | $R \to 1$ | `R_min=0.9, R_target=1` |
+| `minimize` | $R \to 0$ | `R_max=0.1, R_target=0` |
 
 ---
 
 ## 4. 中层：厚度优化
 
-固定拓扑 \((m_1,\ldots,m_N)\) 后，仅优化厚度向量 \(\mathbf{d}\)。
+固定拓扑 $(m_1,\ldots,m_N)$ 后，仅优化厚度向量 $\mathbf{d}$。
 
 ### 4.1 粗坐标下降（coarse descent）
 
@@ -180,12 +193,12 @@ L_{\mathrm{thick}} = \left(\frac{\sum_i d_i}{d_{\mathrm{ref}}}\right)^2
 
 求解阻尼正规方程：
 
-\[
-(J^\top J + \lambda_{\mathrm{LM}} I)\,\Delta\mathbf{d} = -J^\top \mathbf{r}
-\]
+$$
+(J^{\mathsf T} J + \lambda_{\mathrm{LM}}\, I)\,\Delta\mathbf{d} = -J^{\mathsf T} \mathbf{r}
+$$
 
-- \(J\)：残差对厚度的雅可比（前向有限差分，`fd_step_nm` 控制步长）
-- 厚度投影到 \([d_{\min}, d_{\max}]\)
+- $J$：残差对厚度的雅可比（前向有限差分，`fd_step_nm` 控制步长）
+- 厚度投影到 $[d_{\min},\, d_{\max}]$
 - 适合不等式 + 连续目标混合、残差维数适中的问题
 
 ### 4.3 Adam + 波长 mini-batch
@@ -202,11 +215,11 @@ L_{\mathrm{thick}} = \left(\frac{\sum_i d_i}{d_{\mathrm{ref}}}\right)^2
 
 ### 4.5 最优 checkpoint 选择
 
-不仅比较 cost，还比较相对初始厚度的 RMS 变化 \(\Delta\)（`checkpoint_score` / `is_better_checkpoint`）：
+不仅比较 cost，还比较相对初始厚度的 RMS 变化 $\Delta$（`checkpoint_score` / `is_better_checkpoint`）：
 
-\[
-\mathrm{score} = \mathrm{cost} + w_\Delta \cdot (\mathrm{rms\_nm} / 100)
-\]
+$$
+\mathrm{score} = \mathrm{cost} + w_{\Delta} \cdot \frac{\mathrm{rms}_{\mathrm{nm}}}{100}
+$$
 
 近并列时优先选厚度变化更小者，避免无意义的剧烈抖动。
 
@@ -244,7 +257,7 @@ repeat round = 1 .. max_add_rounds:
 layers ← best_stop_feasible(layers)
 ```
 
-**设计波长** \(\lambda_0\)：在波段并集上取对数间隔中心（`n_design_centres` 个），使增层覆盖短波到长波。
+**设计波长** $\lambda_0$：在波段并集上取对数间隔中心（`n_design_centres` 个），使增层覆盖短波到长波。
 
 ### 5.3 Phase 2a：可见 AR 匹配
 
@@ -267,12 +280,12 @@ layers ← LM_optimize(layers)
 
 ### 5.5 经典 Needle 法（扩展方向）
 
-在相邻层界面 \(i\) 处试探厚度 \(\delta \to 0^+\) 的“针状”薄层：
+在相邻层界面 $i$ 处试探厚度 $\delta \to 0^{+}$ 的“针状”薄层：
 
-1. 计算 \(\partial L / \partial \delta\)（伴随法或有限差分）
+1. 计算 $\partial L / \partial \delta$（伴随法或有限差分）
 2. 若灵敏度为负且超阈值，在该位置插入新材料
 3. 插入后调用中层厚度优化
-4. **反向剪枝**：若某层 \(d_i < d_{\mathrm{prune}}\) 或灵敏度 \(\approx 0\)，删除该层并重优化
+4. **反向剪枝**：若某层 $d_i < d_{\mathrm{prune}}$ 或灵敏度 $\approx 0$，删除该层并重优化
 
 比盲目追加 H/L 对更精细，可作为 Phase 1 的升级路径。
 
@@ -280,7 +293,7 @@ layers ← LM_optimize(layers)
 
 | 方法 | 编码 | 说明 |
 |------|------|------|
-| 遗传算法 / DE | \((N, m_{1..N}, d_{1..N})\) 可变长 | 每代评估需调用中层优化 |
+| 遗传算法 / DE | $(N,\, m_{1..N},\, d_{1..N})$ 可变长 | 每代评估需调用中层优化 |
 | 模拟退火 | 随机增删层 + 扰动厚度 | 适合层数 8–20 |
 | 束搜索 | 逐层扩展，保留 top-K | 计算量可控 |
 
@@ -370,13 +383,13 @@ layers ← LM_optimize(layers)
 
 ### 阶段 C：剪枝与灵敏度 Needle
 
-- Phase 2 结束后删除 \(d < d_{\mathrm{prune}}\) 的层并重优化
+- Phase 2 结束后删除 $d < d_{\mathrm{prune}}$ 的层并重优化
 - 可选：界面 Needle 灵敏度指导增层位置
 
 ### 阶段 D：性能
 
 - `use_cuda: true` 启用 CuPy 波长批量 TMM
-- Adam mini-batch 用于层数 > 12 或波长点 > 200 的情形
+- Adam mini-batch 用于层数 $> 12$ 或波长点 $> 200$ 的情形
 
 ---
 
@@ -386,9 +399,9 @@ layers ← LM_optimize(layers)
 
 | 操作 | 复杂度 | 备注 |
 |------|--------|------|
-| 单次 TMM 光谱 | \(O(N_{\mathrm{layer}} \cdot N_\lambda)\) | GPU 批量可加速 |
-| LM 一步（有限差分） | \(O(N_\lambda \cdot N_{\mathrm{free}}^2)\) | \(N_{\mathrm{free}}\) = 自由层数 |
-| Needle 外层 | \(O(K \cdot T_{\mathrm{LM}})\) | \(K\) = 增层轮数，通常 < 20 |
+| 单次 TMM 光谱 | $O(N_{\mathrm{layer}} \cdot N_{\lambda})$ | GPU 批量可加速 |
+| LM 一步（有限差分） | $O(N_{\lambda} \cdot N_{\mathrm{free}}^{2})$ | $N_{\mathrm{free}}$ = 自由层数 |
+| Needle 外层 | $O(K \cdot T_{\mathrm{LM}})$ | $K$ = 增层轮数，通常 $< 20$ |
 
 ### 9.2 关键参数
 
@@ -399,8 +412,8 @@ layers ← LM_optimize(layers)
 | `max_add_rounds` | 8–20 | Phase 1 增层轮数 |
 | `thickness_weight` | 0 → 0.01–0.05 | 达标后逐步增大以压薄 |
 | `fd_step_nm` | 0.5–2 | LM 有限差分步长 |
-| `error_power` | 2 或 4 | >2 时加重离群点（纹波） |
-| `checkpoint_delta_weight` | 0 | >0 时偏好厚度变化小的解 |
+| `error_power` | 2 或 4 | $> 2$ 时加重离群点（纹波） |
+| `checkpoint_delta_weight` | 0 | $> 0$ 时偏好厚度变化小的解 |
 
 ### 9.3 失败时的排查顺序
 
