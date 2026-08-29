@@ -22,10 +22,12 @@ python3 sim/design.py
 ```bash
 python3 -m venv sim/.venv
 sim/.venv/bin/pip install -r sim/requirements.txt
-sim/.venv/bin/python sim/optimize_film.py sim/examples/example_vis_pass_ir_reflect.json
+sim/.venv/bin/python sim/optimize_film.py \
+  sim/examples/example_stack.txt \
+  sim/examples/example_optimize_film.json
 ```
 
-示例目标：420–700 nm 透射率 ≥94%、反射率 ≤2%；780–1800 nm 反射率 ≥50%。结果写入 `sim/out/optimize_example/`。
+示例目标：420–700 nm 反射率最小化；800–1800 nm 反射率最大化。结果写入 `sim/out/optimize_example/`。
 
 ## 主要内容
 

@@ -19,7 +19,7 @@
   "polarization": "unpolarized",
   "plot_wavelength_nm": [400, 1800],
   "plot_step_nm": 20,
-  "output_dir": "../out/optimize_rt_txt_minibatch_smoke",
+  "output_dir": "../out/optimize_minibatch_smoke",
   "mini_batch": {
     "batch_size": 6,
     "n_batches": 4,

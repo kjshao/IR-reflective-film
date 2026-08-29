@@ -28,8 +28,7 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tmm
-from optimize_film import dense_grid_nm
-from plot_rt import plot_rt, write_spectrum_csv
+from plot_rt import dense_grid_nm, plot_rt, write_spectrum_csv
 
 _NM = 1e-9
 

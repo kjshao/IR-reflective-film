@@ -15,6 +15,7 @@ Input JSON fields:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sys
@@ -22,19 +23,228 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import dispersion as dsp
 from lm_optimizer import BandSpec
-from optimize_film import (
-    build_chirped_seed,
-    dense_grid_nm,
-    load_input,
-    parse_bands,
-    parse_layers,
-    plot_range_nm,
-    shade_bands,
-)
-from rt_calculator import make_calculator
+from rt_calculator import make_calculator, material_index
 
 _NM = 1e-9
+
+BAND_BG_COLORS = (
+    "#cfe8ff",
+    "#ffe4cc",
+    "#d4f0d4",
+    "#f0e0ff",
+    "#fff3c4",
+    "#ffd6e0",
+    "#d0f5f0",
+    "#e8e4d8",
+)
+
+
+def band_bg_color(index: int) -> str:
+    return BAND_BG_COLORS[index % len(BAND_BG_COLORS)]
+
+
+def shade_bands(ax, bands: list[BandSpec]) -> None:
+    for i, b in enumerate(bands):
+        ax.axvspan(
+            b.wl_lo / _NM,
+            b.wl_hi / _NM,
+            color=band_bg_color(i),
+            alpha=0.45,
+            lw=0,
+            zorder=0,
+        )
+    edges_nm = sorted(
+        {b.wl_lo / _NM for b in bands} | {b.wl_hi / _NM for b in bands}
+    )
+    for x in edges_nm:
+        ax.axvline(
+            x,
+            color="0.35",
+            linestyle="--",
+            lw=0.9,
+            alpha=0.75,
+            zorder=1,
+        )
+
+
+def load_input(path: str) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def parse_bands(raw: list[dict]) -> list[BandSpec]:
+    bands = []
+    for b in raw:
+        w = b["wavelength_nm"]
+        if len(w) != 2:
+            raise ValueError("each band needs wavelength_nm: [lo, hi]")
+        bands.append(
+            BandSpec(
+                wl_lo=float(w[0]) * _NM,
+                wl_hi=float(w[1]) * _NM,
+                R_min=b.get("R_min"),
+                R_max=b.get("R_max"),
+                T_min=b.get("T_min"),
+                T_max=b.get("T_max"),
+                weight=float(b.get("weight", 1.0)),
+                R_target=b.get("R_target"),
+                T_target=b.get("T_target"),
+            )
+        )
+    return bands
+
+
+def parse_layers(raw: list[dict]) -> list[tuple[str, float]]:
+    layers = []
+    for layer in raw:
+        mat = str(layer["material"]).lower()
+        if "thickness_nm" in layer:
+            d = float(layer["thickness_nm"]) * _NM
+        elif "thickness_m" in layer:
+            d = float(layer["thickness_m"])
+        else:
+            raise ValueError("layer needs thickness_nm or thickness_m")
+        if mat not in dsp.MATERIALS:
+            raise KeyError(
+                f"material '{mat}' not in library; known: {sorted(dsp.MATERIALS)}"
+            )
+        layers.append((mat, d))
+    return layers
+
+
+def build_chirped_seed(seed: dict) -> list[tuple[str, float]]:
+    centres = [float(c) * _NM for c in seed.get("centres_nm", [900, 1200, 1500])]
+    raw_p = seed.get("periods_per_centre", 3)
+    if isinstance(raw_p, list):
+        if len(raw_p) != len(centres):
+            raise ValueError("periods_per_centre list must match centres_nm")
+        periods_list = [int(p) for p in raw_p]
+    else:
+        periods_list = [int(raw_p)] * len(centres)
+    cell = [str(m).lower() for m in seed.get("cell", ["tio2", "sio2"])]
+    layers: list[tuple[str, float]] = []
+    for lam0, periods in zip(centres, periods_list):
+        for _ in range(periods):
+            for mat in cell:
+                if mat not in dsp.MATERIALS:
+                    raise KeyError(f"seed material '{mat}' not in library")
+                n = dsp.MATERIALS[mat](lam0).real
+                layers.append((mat, 0.25 * lam0 / max(n, 1.01)))
+    return layers
+
+
+def plot_range_nm(cfg: dict, bands: list[BandSpec]) -> tuple[float, float]:
+    if "plot_wavelength_nm" in cfg:
+        lo, hi = cfg["plot_wavelength_nm"]
+        return float(lo), float(hi)
+    lo = min(b.wl_lo for b in bands) / _NM
+    hi = max(b.wl_hi for b in bands) / _NM
+    return lo, hi
+
+
+def dense_grid_nm(lo_nm: float, hi_nm: float, step_nm: float) -> list[float]:
+    n = max(1, int(round((hi_nm - lo_nm) / step_nm)))
+    return [lo_nm + i * (hi_nm - lo_nm) / n for i in range(n + 1)]
+
+
+def plot_results(
+    path: str,
+    wavelengths_m: list[float],
+    R_before: list[float],
+    T_before: list[float],
+    R_after: list[float],
+    T_after: list[float],
+    bands: list[BandSpec],
+    materials_to_show: list[str] | None = None,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise SystemExit(
+            "matplotlib is required for plotting; pip install matplotlib"
+        ) from exc
+
+    wl_nm = [w / _NM for w in wavelengths_m]
+    materials_to_show = materials_to_show or ["sio2", "tio2", "glass"]
+
+    fig, axes = plt.subplots(3, 1, figsize=(9, 10), sharex=True)
+
+    ax = axes[0]
+    ax.plot(wl_nm, [100 * r for r in R_before], "--", color="C0", label="R before")
+    ax.plot(wl_nm, [100 * r for r in R_after], "-", color="C0", label="R after")
+    ax.plot(wl_nm, [100 * t for t in T_before], "--", color="C1", label="T before")
+    ax.plot(wl_nm, [100 * t for t in T_after], "-", color="C1", label="T after")
+    shade_bands(ax, bands)
+    for b in bands:
+        if b.R_min is not None:
+            ax.hlines(
+                100 * b.R_min,
+                b.wl_lo / _NM,
+                b.wl_hi / _NM,
+                colors="C0",
+                linestyles=":",
+                lw=1,
+            )
+        if b.R_max is not None:
+            ax.hlines(
+                100 * b.R_max,
+                b.wl_lo / _NM,
+                b.wl_hi / _NM,
+                colors="C0",
+                linestyles=":",
+                lw=1,
+            )
+        if b.T_min is not None:
+            ax.hlines(
+                100 * b.T_min,
+                b.wl_lo / _NM,
+                b.wl_hi / _NM,
+                colors="C1",
+                linestyles=":",
+                lw=1,
+            )
+        if b.T_max is not None:
+            ax.hlines(
+                100 * b.T_max,
+                b.wl_lo / _NM,
+                b.wl_hi / _NM,
+                colors="C1",
+                linestyles=":",
+                lw=1,
+            )
+    ax.set_ylabel("R, T (%)")
+    ax.set_ylim(-2, 105)
+    ax.legend(loc="best", fontsize=8)
+    ax.set_title("Reflectance & transmittance before / after optimisation")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    ax.plot(wl_nm, [100 * r for r in R_before], "--", label="R before")
+    ax.plot(wl_nm, [100 * r for r in R_after], "-", label="R after")
+    shade_bands(ax, bands)
+    ax.set_ylabel("R (%)")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Reflectance")
+
+    ax = axes[2]
+    for name in materials_to_show:
+        if name not in dsp.MATERIALS:
+            continue
+        nk = material_index(name, wavelengths_m)
+        ax.plot(wl_nm, [z.real for z in nk], label=f"n({name})")
+    ax.set_xlabel("Wavelength (nm)")
+    ax.set_ylabel("n")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Material refractive index (library)")
+
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def band_stats(
