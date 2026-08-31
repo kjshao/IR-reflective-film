@@ -1,0 +1,60 @@
+{
+  "incident_angle_deg": 0,
+  "polarization": "unpolarized",
+  "incident_medium": "air",
+  "substrate": "glass",
+  "substrate_thickness_m": 0.0007,
+  "exit_medium": "air",
+  "substrate_model": "semi_infinite",
+  "rt_engine": "tmm",
+  "comment": "Broadband high reflector: vis+IR R→1 / T→0. Vis-weighted, log-chirped seed.",
+  "seed": {
+    "type": "chirped_qw",
+    "centres_nm": [430, 470, 520, 570, 630, 690, 850, 1100, 1400, 1750],
+    "periods_per_centre": [3, 3, 3, 3, 2, 2, 2, 2, 2, 2],
+    "cell": ["tio2", "sio2"]
+  },
+  "bands": [
+    {
+      "wavelength_nm": [420, 700],
+      "R_min": 1.0,
+      "T_max": 0.0,
+      "R_target": 1.0,
+      "T_target": 0.0,
+      "weight": 5.0
+    },
+    {
+      "wavelength_nm": [780, 1800],
+      "R_min": 1.0,
+      "T_max": 0.0,
+      "R_target": 1.0,
+      "T_target": 0.0,
+      "weight": 5.0
+    }
+  ],
+  "optimizer": {
+    "method": "adam",
+    "use_needle": true,
+    "thickness_weight": 0.01,
+    "wavelength_step_nm": 15,
+    "max_layers": 36,
+    "max_add_rounds": 10,
+    "n_design_centres": 8,
+    "max_iter": 30,
+    "high_index": "tio2",
+    "low_index": "sio2",
+    "lambda0": 0.01,
+    "fd_step_nm": 1.0,
+    "adam_lr_nm": 2.0,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_eps": 1e-8,
+    "adam_max_step_nm": 10.0,
+    "ar_layers": 4,
+    "ar_add_rounds": 3,
+    "front_free_extra": 8
+  },
+  "plot_wavelength_nm": [400, 1800],
+  "plot_step_nm": 5,
+  "output_dir": "../out/optimize_example"
+}

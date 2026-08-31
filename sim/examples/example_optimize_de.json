@@ -1,0 +1,56 @@
+{
+  "comment": "Smoke test: differential evolution on a short fixed stack (no needle).",
+  "incident_angle_deg": 0,
+  "polarization": "unpolarized",
+  "incident_medium": "air",
+  "substrate": "glass",
+  "substrate_thickness_m": 0.0007,
+  "exit_medium": "air",
+  "substrate_model": "semi_infinite",
+  "rt_engine": "tmm",
+  "use_cuda": false,
+  "layers": [
+    {"material": "tio2", "thickness_nm": 55},
+    {"material": "sio2", "thickness_nm": 85},
+    {"material": "tio2", "thickness_nm": 55},
+    {"material": "sio2", "thickness_nm": 85}
+  ],
+  "bands": [
+    {
+      "wavelength_nm": [420, 700],
+      "R_min": 0.8,
+      "T_max": 0.2,
+      "R_target": 1.0,
+      "T_target": 0.0,
+      "weight": 2.0
+    },
+    {
+      "wavelength_nm": [780, 1400],
+      "R_min": 0.9,
+      "T_max": 0.1,
+      "R_target": 1.0,
+      "T_target": 0.0,
+      "weight": 1.0
+    }
+  ],
+    "optimizer": {
+    "method": "de",
+    "use_needle": false,
+    "thickness_weight": 0.01,
+    "wavelength_step_nm": 25,
+    "max_iter": 8,
+    "de_popsize": 8,
+    "de_mutation": [0.5, 1.0],
+    "de_recombination": 0.7,
+    "global_seed": 0,
+    "global_polish": true,
+    "global_polish_method": "lm",
+    "checkpoint_on_best": true,
+    "checkpoint_local_every": 5,
+    "fd_step_nm": 1.0,
+    "lambda0": 0.01
+  },
+  "plot_wavelength_nm": [400, 1400],
+  "plot_step_nm": 10,
+  "output_dir": "../out/optimize_de_smoke"
+}

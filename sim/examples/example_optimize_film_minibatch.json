@@ -1,0 +1,29 @@
+{
+  "comment": "Mini-batch Adam smoke test (few epochs).",
+  "n_bands": 3,
+  "method": "adam",
+  "bands": [
+    {"wavelength_nm": [420, 700], "objective": "minimize", "weight": 2.0},
+    {"wavelength_nm": [800, 1200], "objective": "maximize", "weight": 1.5},
+    {"wavelength_nm": [1400, 1800], "objective": "maximize", "weight": 1.0}
+  ],
+  "wavelength_step_nm": 20,
+  "max_iter": 5,
+  "thickness_weight": 0.0,
+  "error_power": 4.0,
+  "smooth_weight": 0.5,
+  "ripple_weight": 0.2,
+  "fd_step_nm": 0.5,
+  "adam_lr_nm": 2.0,
+  "incident_angle_deg": 0,
+  "polarization": "unpolarized",
+  "plot_wavelength_nm": [400, 1800],
+  "plot_step_nm": 20,
+  "output_dir": "../out/optimize_minibatch_smoke",
+  "mini_batch": {
+    "batch_size": 6,
+    "n_batches": 4,
+    "n_epochs": 3,
+    "shuffle_seed": 0
+  }
+}
