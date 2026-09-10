@@ -29,16 +29,79 @@ from rt_calculator import make_calculator, material_index
 
 _NM = 1e-9
 
+# Soft band shading (low-chroma, easy on the eyes).
 BAND_BG_COLORS = (
-    "#cfe8ff",
-    "#ffe4cc",
-    "#d4f0d4",
-    "#f0e0ff",
-    "#fff3c4",
-    "#ffd6e0",
-    "#d0f5f0",
-    "#e8e4d8",
+    "#d9e8f5",
+    "#f5e6d4",
+    "#ddebd8",
+    "#e8dff0",
+    "#f3ecd4",
+    "#f0dde3",
+    "#d8ebe7",
+    "#e8e4dc",
 )
+
+# Spectrum curve colors (muted, colorblind-friendlier).
+COLOR_R = "#3d6f9c"  # soft slate blue
+COLOR_T = "#c17a3a"  # soft amber
+COLOR_A = "#6a8f6a"  # sage green
+
+# Layer bar fills: light enough for dark labels.
+_LAYER_FACE_COLORS = {
+    "tio2": "#8fb4d4",
+    "sio2": "#e6b980",
+    "ito": "#8fbf88",
+    "ag": "#c9a0c0",
+    "glass": "#c4b09a",
+    "pet": "#e6d28a",
+    "air": "#ececec",
+}
+_LAYER_FALLBACK = (
+    "#8fb4d4",
+    "#e6b980",
+    "#8fbf88",
+    "#d98989",
+    "#7fb8b2",
+    "#c9a0c0",
+    "#e8a8b0",
+    "#c4b09a",
+)
+
+# Typography — keep readable on saved PNGs (dpi=150).
+FONT_TITLE = 15
+FONT_LABEL = 13
+FONT_TICK = 12
+FONT_LEGEND = 12
+FONT_LAYER = 13
+FONT_LAYER_SMALL = 12
+LINEWIDTH = 2.15
+
+
+def apply_plot_style() -> None:
+    """Global matplotlib defaults for softer, readable figures."""
+    import matplotlib as mpl
+
+    mpl.rcParams.update(
+        {
+            "font.size": FONT_TICK,
+            "axes.titlesize": FONT_TITLE,
+            "axes.labelsize": FONT_LABEL,
+            "xtick.labelsize": FONT_TICK,
+            "ytick.labelsize": FONT_TICK,
+            "legend.fontsize": FONT_LEGEND,
+            "figure.facecolor": "white",
+            "axes.facecolor": "#fbfaf8",
+            "axes.edgecolor": "#6e6e6e",
+            "text.color": "#222222",
+            "axes.labelcolor": "#222222",
+            "xtick.color": "#333333",
+            "ytick.color": "#333333",
+            "grid.color": "#bdbdbd",
+            "grid.linewidth": 0.8,
+            "axes.grid": True,
+            "axes.axisbelow": True,
+        }
+    )
 
 
 def band_bg_color(index: int) -> str:
@@ -51,7 +114,7 @@ def shade_bands(ax, bands: list[BandSpec]) -> None:
             b.wl_lo / _NM,
             b.wl_hi / _NM,
             color=band_bg_color(i),
-            alpha=0.45,
+            alpha=0.55,
             lw=0,
             zorder=0,
         )
@@ -61,12 +124,39 @@ def shade_bands(ax, bands: list[BandSpec]) -> None:
     for x in edges_nm:
         ax.axvline(
             x,
-            color="0.35",
+            color="#8a8a8a",
             linestyle="--",
             lw=0.9,
-            alpha=0.75,
+            alpha=0.55,
             zorder=1,
         )
+
+
+def style_axes(ax, *, title: str | None = None, xlabel: str | None = None,
+               ylabel: str | None = None) -> None:
+    """Apply shared font sizes, grid, and spine styling."""
+    if title is not None:
+        ax.set_title(title, fontsize=FONT_TITLE, pad=10, color="#222222")
+    if xlabel is not None:
+        ax.set_xlabel(xlabel, fontsize=FONT_LABEL, labelpad=6)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel, fontsize=FONT_LABEL, labelpad=6)
+    ax.tick_params(axis="both", labelsize=FONT_TICK)
+    ax.grid(True, alpha=0.35, color="#bdbdbd", linewidth=0.8)
+    for spine in ax.spines.values():
+        spine.set_color("#6e6e6e")
+        spine.set_linewidth(0.9)
+
+
+def contrast_text_color(hex_color: str) -> str:
+    """Pick dark or light label color for readable text on ``hex_color``."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return "#1a1a1a"
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    # Relative luminance (sRGB approx).
+    luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+    return "#1a1a1a" if luma > 0.55 else "#ffffff"
 
 
 def load_input(path: str) -> dict[str, Any]:
@@ -150,33 +240,14 @@ def dense_grid_nm(lo_nm: float, hi_nm: float, step_nm: float) -> list[float]:
 
 
 # Distinct fills for common coating materials on stack-thickness bars.
-_LAYER_FACE_COLORS = {
-    "tio2": "#4c78a8",
-    "sio2": "#f58518",
-    "ito": "#54a24b",
-    "ag": "#b279a2",
-    "glass": "#9d755d",
-    "pet": "#eeca3b",
-    "air": "#e0e0e0",
-}
+# (Canonical map lives above as _LAYER_FACE_COLORS / _LAYER_FALLBACK.)
 
 
 def layer_face_color(material: str, index: int = 0) -> str:
     key = str(material).lower()
     if key in _LAYER_FACE_COLORS:
         return _LAYER_FACE_COLORS[key]
-    # Fallback palette for unknown names.
-    palette = (
-        "#4c78a8",
-        "#f58518",
-        "#54a24b",
-        "#e45756",
-        "#72b7b2",
-        "#b279a2",
-        "#ff9da6",
-        "#9d755d",
-    )
-    return palette[index % len(palette)]
+    return _LAYER_FALLBACK[index % len(_LAYER_FALLBACK)]
 
 
 def format_layers_caption(
@@ -203,7 +274,7 @@ def draw_stack_thickness(
     *,
     label: str = "",
     y: float = 0.0,
-    height: float = 0.7,
+    height: float = 0.78,
     show_values: bool = True,
 ) -> float:
     """Draw one horizontal stacked bar of physical thicknesses (nm).
@@ -217,7 +288,7 @@ def draw_stack_thickness(
             "(no layers)",
             ha="center",
             va="center",
-            fontsize=9,
+            fontsize=FONT_LABEL,
             transform=ax.get_yaxis_transform(),
         )
         return 0.0
@@ -225,8 +296,8 @@ def draw_stack_thickness(
     total_nm = sum(d for _, d in layers) / _NM
     x = 0.0
     n = len(layers)
-    # Hide numeric labels on very thin segments when the stack is crowded.
-    min_label_frac = 0.045 if n <= 12 else (0.06 if n <= 24 else 0.08)
+    # Numbers only inside segments — keeps type large enough to read.
+    min_num_frac = 0.028 if n <= 16 else 0.04
     for i, (mat, d) in enumerate(layers):
         w = d / _NM
         color = layer_face_color(mat, i)
@@ -236,45 +307,46 @@ def draw_stack_thickness(
             left=x,
             height=height,
             color=color,
-            edgecolor="0.25",
-            linewidth=0.6,
+            edgecolor="#5a5a5a",
+            linewidth=0.7,
             align="center",
         )
-        if show_values and total_nm > 0 and w / total_nm >= min_label_frac:
+        if show_values and total_nm > 0 and w / total_nm >= min_num_frac:
             ax.text(
                 x + 0.5 * w,
                 y,
-                f"{mat}\n{w:.1f}",
+                f"{w:.1f}",
                 ha="center",
                 va="center",
-                fontsize=7 if n <= 16 else 6,
-                color="white",
-                clip_on=True,
-            )
-        elif show_values and total_nm > 0 and w / total_nm >= min_label_frac * 0.55:
-            ax.text(
-                x + 0.5 * w,
-                y,
-                f"{w:.0f}",
-                ha="center",
-                va="center",
-                fontsize=6,
-                color="white",
+                fontsize=FONT_LAYER,
+                color=contrast_text_color(color),
                 clip_on=True,
             )
         x += w
 
     if label:
         ax.text(
-            -0.01 * max(total_nm, 1.0),
+            -0.012 * max(total_nm, 1.0),
             y,
             label,
             ha="right",
             va="center",
-            fontsize=9,
+            fontsize=FONT_LABEL,
             fontweight="bold",
+            color="#2a2a2a",
         )
     return total_nm
+
+
+def _layers_list_text(layers: list[tuple[str, float]]) -> str:
+    """Compact readable layer list for under the thickness bar."""
+    parts = [f"{i}.{mat} {d / _NM:.1f}" for i, (mat, d) in enumerate(layers, 1)]
+    # Wrap every 4 entries so lines stay on-canvas.
+    chunk = 4 if len(parts) > 4 else len(parts)
+    lines = []
+    for i in range(0, len(parts), chunk):
+        lines.append("  ·  ".join(parts[i : i + chunk]))
+    return "\n".join(lines)
 
 
 def plot_stack_panel(
@@ -300,20 +372,47 @@ def plot_stack_panel(
     for i, (label, lyrs) in enumerate(rows):
         y = float(len(rows) - 1 - i)
         totals.append(
-            draw_stack_thickness(ax, lyrs, label=label, y=y, height=0.65)
+            draw_stack_thickness(ax, lyrs, label=label, y=y, height=0.7)
         )
 
     xmax = max(totals) if totals else 1.0
     ax.set_xlim(0.0, xmax * 1.02 if xmax > 0 else 1.0)
-    ax.set_ylim(-0.55, len(rows) - 0.45)
+    # Leave room below for the wrapped layer list + legend.
+    text_lines = 0
+    for _, lyrs in rows:
+        text_lines += 1 + _layers_list_text(lyrs).count("\n")
+    bottom = -0.7 - 0.42 * text_lines - 0.35
+    ax.set_ylim(bottom, len(rows) - 0.3)
     ax.set_yticks([])
-    ax.set_xlabel("Layer thickness (nm)")
+
+    # Readable layer lists under the bars (not cramped inside segments).
+    y_text = -0.7
+    for label, lyrs in rows:
+        caption = f"{label}:  " + _layers_list_text(lyrs)
+        ax.text(
+            0.0,
+            y_text,
+            caption,
+            ha="left",
+            va="top",
+            fontsize=FONT_LABEL,
+            color="#2a2a2a",
+            family="sans-serif",
+            linespacing=1.35,
+        )
+        y_text -= 0.42 * (1 + caption.count("\n"))
+
     parts = []
     for label, lyrs in rows:
         tot = sum(d for _, d in lyrs) / _NM
         parts.append(f"{label}: {len(lyrs)} lyrs, Σ={tot:.1f} nm")
-    ax.set_title("Layer thicknesses  (" + "; ".join(parts) + ")")
-    ax.grid(True, axis="x", alpha=0.3)
+    style_axes(
+        ax,
+        title="Layer thicknesses  (" + "; ".join(parts) + ")",
+        xlabel="Layer thickness (nm)",
+    )
+    ax.grid(True, axis="x", alpha=0.28, color="#9a9a9a", linewidth=0.8)
+    ax.grid(False, axis="y")
 
     # Legend for materials present (unique, order of first appearance).
     seen: dict[str, str] = {}
@@ -326,14 +425,15 @@ def plot_stack_panel(
         from matplotlib.patches import Patch
 
         handles = [
-            Patch(facecolor=c, edgecolor="0.25", label=m)
+            Patch(facecolor=c, edgecolor="#5a5a5a", label=m)
             for m, c in seen.items()
         ]
         ax.legend(
             handles=handles,
-            loc="upper right",
-            fontsize=8,
-            framealpha=0.9,
+            loc="lower right",
+            fontsize=FONT_LEGEND,
+            framealpha=0.95,
+            edgecolor="#c8c8c8",
             ncol=min(4, len(handles)),
         )
 
@@ -357,6 +457,8 @@ def plot_results(
             "matplotlib is required for plotting; pip install matplotlib"
         ) from exc
 
+    apply_plot_style()
+
     wl_nm = [w / _NM for w in wavelengths_m]
     materials_to_show = materials_to_show or ["sio2", "tio2", "glass"]
     has_stack = layers_before is not None or layers_after is not None
@@ -364,7 +466,7 @@ def plot_results(
     fig, axes = plt.subplots(
         3,
         1,
-        figsize=(9, 10.5 if has_stack else 10),
+        figsize=(10.5, 12.8 if has_stack else 10.5),
         sharex=False,
     )
     axes[1].sharex(axes[0])
@@ -372,10 +474,40 @@ def plot_results(
         axes[2].sharex(axes[0])
 
     ax = axes[0]
-    ax.plot(wl_nm, [100 * r for r in R_before], "--", color="C0", label="R before")
-    ax.plot(wl_nm, [100 * r for r in R_after], "-", color="C0", label="R after")
-    ax.plot(wl_nm, [100 * t for t in T_before], "--", color="C1", label="T before")
-    ax.plot(wl_nm, [100 * t for t in T_after], "-", color="C1", label="T after")
+    ax.plot(
+        wl_nm,
+        [100 * r for r in R_before],
+        "--",
+        color=COLOR_R,
+        lw=LINEWIDTH,
+        alpha=0.75,
+        label="R before",
+    )
+    ax.plot(
+        wl_nm,
+        [100 * r for r in R_after],
+        "-",
+        color=COLOR_R,
+        lw=LINEWIDTH,
+        label="R after",
+    )
+    ax.plot(
+        wl_nm,
+        [100 * t for t in T_before],
+        "--",
+        color=COLOR_T,
+        lw=LINEWIDTH,
+        alpha=0.75,
+        label="T before",
+    )
+    ax.plot(
+        wl_nm,
+        [100 * t for t in T_after],
+        "-",
+        color=COLOR_T,
+        lw=LINEWIDTH,
+        label="T after",
+    )
     shade_bands(ax, bands)
     for b in bands:
         if b.R_min is not None:
@@ -383,53 +515,69 @@ def plot_results(
                 100 * b.R_min,
                 b.wl_lo / _NM,
                 b.wl_hi / _NM,
-                colors="C0",
+                colors=COLOR_R,
                 linestyles=":",
-                lw=1,
+                lw=1.2,
             )
         if b.R_max is not None:
             ax.hlines(
                 100 * b.R_max,
                 b.wl_lo / _NM,
                 b.wl_hi / _NM,
-                colors="C0",
+                colors=COLOR_R,
                 linestyles=":",
-                lw=1,
+                lw=1.2,
             )
         if b.T_min is not None:
             ax.hlines(
                 100 * b.T_min,
                 b.wl_lo / _NM,
                 b.wl_hi / _NM,
-                colors="C1",
+                colors=COLOR_T,
                 linestyles=":",
-                lw=1,
+                lw=1.2,
             )
         if b.T_max is not None:
             ax.hlines(
                 100 * b.T_max,
                 b.wl_lo / _NM,
                 b.wl_hi / _NM,
-                colors="C1",
+                colors=COLOR_T,
                 linestyles=":",
-                lw=1,
+                lw=1.2,
             )
-    ax.set_ylabel("R, T (%)")
     ax.set_ylim(-2, 105)
-    ax.legend(loc="best", fontsize=8)
-    ax.set_title("Reflectance & transmittance before / after optimisation")
-    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
+    style_axes(
+        ax,
+        title="Reflectance & transmittance before / after optimisation",
+        ylabel="R, T (%)",
+    )
 
     ax = axes[1]
-    ax.plot(wl_nm, [100 * r for r in R_before], "--", label="R before")
-    ax.plot(wl_nm, [100 * r for r in R_after], "-", label="R after")
+    ax.plot(
+        wl_nm,
+        [100 * r for r in R_before],
+        "--",
+        color=COLOR_R,
+        lw=LINEWIDTH,
+        alpha=0.75,
+        label="R before",
+    )
+    ax.plot(
+        wl_nm,
+        [100 * r for r in R_after],
+        "-",
+        color=COLOR_R,
+        lw=LINEWIDTH,
+        label="R after",
+    )
     shade_bands(ax, bands)
-    ax.set_ylabel("R (%)")
     if has_stack:
-        ax.set_xlabel("Wavelength (nm)")
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(True, alpha=0.3)
-    ax.set_title("Reflectance")
+        style_axes(ax, title="Reflectance", xlabel="Wavelength (nm)", ylabel="R (%)")
+    else:
+        style_axes(ax, title="Reflectance", ylabel="R (%)")
+    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
 
     ax = axes[2]
     if has_stack:
@@ -439,20 +587,29 @@ def plot_results(
             layers_after=layers_after,
         )
     else:
-        for name in materials_to_show:
+        mat_colors = (COLOR_R, COLOR_T, COLOR_A, "#7a6a9a", "#8a7a5a")
+        for i, name in enumerate(materials_to_show):
             if name not in dsp.MATERIALS:
                 continue
             nk = material_index(name, wavelengths_m)
-            ax.plot(wl_nm, [z.real for z in nk], label=f"n({name})")
-        ax.set_xlabel("Wavelength (nm)")
-        ax.set_ylabel("n")
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_title("Material refractive index (library)")
+            ax.plot(
+                wl_nm,
+                [z.real for z in nk],
+                color=mat_colors[i % len(mat_colors)],
+                lw=LINEWIDTH,
+                label=f"n({name})",
+            )
+        style_axes(
+            ax,
+            title="Material refractive index (library)",
+            xlabel="Wavelength (nm)",
+            ylabel="n",
+        )
+        ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -542,35 +699,38 @@ def plot_rt(
             "matplotlib is required for plotting; pip install matplotlib"
         ) from exc
 
+    apply_plot_style()
+
     wl_nm = [w / _NM for w in wavelengths_m]
     if layers:
-        fig = plt.figure(figsize=(9, 9.2))
-        gs = fig.add_gridspec(3, 1, height_ratios=[1.15, 1.0, 0.7])
+        fig = plt.figure(figsize=(10.5, 11.4))
+        gs = fig.add_gridspec(3, 1, height_ratios=[1.1, 1.0, 1.25])
         ax0 = fig.add_subplot(gs[0])
         ax1 = fig.add_subplot(gs[1], sharex=ax0)
         ax2 = fig.add_subplot(gs[2])
         axes = [ax0, ax1, ax2]
     else:
-        fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+        fig, axes = plt.subplots(2, 1, figsize=(10, 7.5), sharex=True)
         axes = list(axes)
 
     ax = axes[0]
-    ax.plot(wl_nm, [100 * r for r in R], color="C0", label="R")
-    ax.plot(wl_nm, [100 * t for t in T], color="C1", label="T")
+    ax.plot(wl_nm, [100 * r for r in R], color=COLOR_R, lw=LINEWIDTH, label="R")
+    ax.plot(wl_nm, [100 * t for t in T], color=COLOR_T, lw=LINEWIDTH, label="T")
     ax.plot(
         wl_nm,
         [100 * max(0.0, 1.0 - r - t) for r, t in zip(R, T)],
-        color="C2",
+        color=COLOR_A,
+        lw=LINEWIDTH,
         label="A ≈ 1−R−T",
-        alpha=0.8,
+        alpha=0.9,
     )
     shade_bands(ax, bands)
     for b in bands:
         for val, color in (
-            (b.R_min, "C0"),
-            (b.R_max, "C0"),
-            (b.T_min, "C1"),
-            (b.T_max, "C1"),
+            (b.R_min, COLOR_R),
+            (b.R_max, COLOR_R),
+            (b.T_min, COLOR_T),
+            (b.T_max, COLOR_T),
         ):
             if val is not None:
                 ax.hlines(
@@ -579,30 +739,26 @@ def plot_rt(
                     b.wl_hi / _NM,
                     colors=color,
                     linestyles=":",
-                    lw=1,
+                    lw=1.2,
                 )
-    ax.set_ylabel("R, T, A (%)")
     ax.set_ylim(-2, 105)
-    ax.legend(loc="best", fontsize=8)
-    ax.set_title(title)
-    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
+    style_axes(ax, title=title, ylabel="R, T, A (%)")
 
     ax = axes[1]
-    ax.plot(wl_nm, [100 * r for r in R], color="C0", label="R")
-    ax.plot(wl_nm, [100 * t for t in T], color="C1", label="T")
+    ax.plot(wl_nm, [100 * r for r in R], color=COLOR_R, lw=LINEWIDTH, label="R")
+    ax.plot(wl_nm, [100 * t for t in T], color=COLOR_T, lw=LINEWIDTH, label="T")
     shade_bands(ax, bands)
-    ax.set_xlabel("Wavelength (nm)")
-    ax.set_ylabel("R, T (%)")
     ax.set_ylim(-2, 105)
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
+    style_axes(ax, xlabel="Wavelength (nm)", ylabel="R, T (%)")
 
     if layers:
         plot_stack_panel(axes[2], layers=layers)
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
 
 
