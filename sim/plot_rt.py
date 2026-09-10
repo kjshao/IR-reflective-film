@@ -149,6 +149,195 @@ def dense_grid_nm(lo_nm: float, hi_nm: float, step_nm: float) -> list[float]:
     return [lo_nm + i * (hi_nm - lo_nm) / n for i in range(n + 1)]
 
 
+# Distinct fills for common coating materials on stack-thickness bars.
+_LAYER_FACE_COLORS = {
+    "tio2": "#4c78a8",
+    "sio2": "#f58518",
+    "ito": "#54a24b",
+    "ag": "#b279a2",
+    "glass": "#9d755d",
+    "pet": "#eeca3b",
+    "air": "#e0e0e0",
+}
+
+
+def layer_face_color(material: str, index: int = 0) -> str:
+    key = str(material).lower()
+    if key in _LAYER_FACE_COLORS:
+        return _LAYER_FACE_COLORS[key]
+    # Fallback palette for unknown names.
+    palette = (
+        "#4c78a8",
+        "#f58518",
+        "#54a24b",
+        "#e45756",
+        "#72b7b2",
+        "#b279a2",
+        "#ff9da6",
+        "#9d755d",
+    )
+    return palette[index % len(palette)]
+
+
+def format_layers_caption(
+    layers: list[tuple[str, float]],
+    *,
+    max_lines: int | None = None,
+) -> str:
+    """Multi-line caption: ``i. material  d.dd nm`` plus total thickness."""
+    if not layers:
+        return ""
+    total_nm = sum(d for _, d in layers) / _NM
+    lines = [f"layers Σ={total_nm:.1f} nm"]
+    show = layers if max_lines is None else layers[:max_lines]
+    for i, (mat, d) in enumerate(show, 1):
+        lines.append(f"{i:2d}. {mat:<8} {d / _NM:7.2f} nm")
+    if max_lines is not None and len(layers) > max_lines:
+        lines.append(f"  … +{len(layers) - max_lines} more")
+    return "\n".join(lines)
+
+
+def draw_stack_thickness(
+    ax,
+    layers: list[tuple[str, float]],
+    *,
+    label: str = "",
+    y: float = 0.0,
+    height: float = 0.7,
+    show_values: bool = True,
+) -> float:
+    """Draw one horizontal stacked bar of physical thicknesses (nm).
+
+    Returns total thickness in nm (0 if empty).
+    """
+    if not layers:
+        ax.text(
+            0.5,
+            y,
+            "(no layers)",
+            ha="center",
+            va="center",
+            fontsize=9,
+            transform=ax.get_yaxis_transform(),
+        )
+        return 0.0
+
+    total_nm = sum(d for _, d in layers) / _NM
+    x = 0.0
+    n = len(layers)
+    # Hide numeric labels on very thin segments when the stack is crowded.
+    min_label_frac = 0.045 if n <= 12 else (0.06 if n <= 24 else 0.08)
+    for i, (mat, d) in enumerate(layers):
+        w = d / _NM
+        color = layer_face_color(mat, i)
+        ax.barh(
+            y,
+            w,
+            left=x,
+            height=height,
+            color=color,
+            edgecolor="0.25",
+            linewidth=0.6,
+            align="center",
+        )
+        if show_values and total_nm > 0 and w / total_nm >= min_label_frac:
+            ax.text(
+                x + 0.5 * w,
+                y,
+                f"{mat}\n{w:.1f}",
+                ha="center",
+                va="center",
+                fontsize=7 if n <= 16 else 6,
+                color="white",
+                clip_on=True,
+            )
+        elif show_values and total_nm > 0 and w / total_nm >= min_label_frac * 0.55:
+            ax.text(
+                x + 0.5 * w,
+                y,
+                f"{w:.0f}",
+                ha="center",
+                va="center",
+                fontsize=6,
+                color="white",
+                clip_on=True,
+            )
+        x += w
+
+    if label:
+        ax.text(
+            -0.01 * max(total_nm, 1.0),
+            y,
+            label,
+            ha="right",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+        )
+    return total_nm
+
+
+def plot_stack_panel(
+    ax,
+    layers: list[tuple[str, float]] | None = None,
+    layers_before: list[tuple[str, float]] | None = None,
+    layers_after: list[tuple[str, float]] | None = None,
+) -> None:
+    """Bottom / side panel: stacked thickness bar(s) with total Σ."""
+    rows: list[tuple[str, list[tuple[str, float]]]] = []
+    if layers_before is not None:
+        rows.append(("before", layers_before))
+    if layers_after is not None:
+        rows.append(("after", layers_after))
+    if not rows and layers is not None:
+        rows.append(("stack", layers))
+
+    if not rows:
+        ax.set_axis_off()
+        return
+
+    totals: list[float] = []
+    for i, (label, lyrs) in enumerate(rows):
+        y = float(len(rows) - 1 - i)
+        totals.append(
+            draw_stack_thickness(ax, lyrs, label=label, y=y, height=0.65)
+        )
+
+    xmax = max(totals) if totals else 1.0
+    ax.set_xlim(0.0, xmax * 1.02 if xmax > 0 else 1.0)
+    ax.set_ylim(-0.55, len(rows) - 0.45)
+    ax.set_yticks([])
+    ax.set_xlabel("Layer thickness (nm)")
+    parts = []
+    for label, lyrs in rows:
+        tot = sum(d for _, d in lyrs) / _NM
+        parts.append(f"{label}: {len(lyrs)} lyrs, Σ={tot:.1f} nm")
+    ax.set_title("Layer thicknesses  (" + "; ".join(parts) + ")")
+    ax.grid(True, axis="x", alpha=0.3)
+
+    # Legend for materials present (unique, order of first appearance).
+    seen: dict[str, str] = {}
+    for _, lyrs in rows:
+        for i, (mat, _) in enumerate(lyrs):
+            key = mat.lower()
+            if key not in seen:
+                seen[key] = layer_face_color(mat, i)
+    if seen:
+        from matplotlib.patches import Patch
+
+        handles = [
+            Patch(facecolor=c, edgecolor="0.25", label=m)
+            for m, c in seen.items()
+        ]
+        ax.legend(
+            handles=handles,
+            loc="upper right",
+            fontsize=8,
+            framealpha=0.9,
+            ncol=min(4, len(handles)),
+        )
+
+
 def plot_results(
     path: str,
     wavelengths_m: list[float],
@@ -158,6 +347,8 @@ def plot_results(
     T_after: list[float],
     bands: list[BandSpec],
     materials_to_show: list[str] | None = None,
+    layers_before: list[tuple[str, float]] | None = None,
+    layers_after: list[tuple[str, float]] | None = None,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -168,8 +359,17 @@ def plot_results(
 
     wl_nm = [w / _NM for w in wavelengths_m]
     materials_to_show = materials_to_show or ["sio2", "tio2", "glass"]
+    has_stack = layers_before is not None or layers_after is not None
 
-    fig, axes = plt.subplots(3, 1, figsize=(9, 10), sharex=True)
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=(9, 10.5 if has_stack else 10),
+        sharex=False,
+    )
+    axes[1].sharex(axes[0])
+    if not has_stack:
+        axes[2].sharex(axes[0])
 
     ax = axes[0]
     ax.plot(wl_nm, [100 * r for r in R_before], "--", color="C0", label="R before")
@@ -225,21 +425,30 @@ def plot_results(
     ax.plot(wl_nm, [100 * r for r in R_after], "-", label="R after")
     shade_bands(ax, bands)
     ax.set_ylabel("R (%)")
+    if has_stack:
+        ax.set_xlabel("Wavelength (nm)")
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.set_title("Reflectance")
 
     ax = axes[2]
-    for name in materials_to_show:
-        if name not in dsp.MATERIALS:
-            continue
-        nk = material_index(name, wavelengths_m)
-        ax.plot(wl_nm, [z.real for z in nk], label=f"n({name})")
-    ax.set_xlabel("Wavelength (nm)")
-    ax.set_ylabel("n")
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(True, alpha=0.3)
-    ax.set_title("Material refractive index (library)")
+    if has_stack:
+        plot_stack_panel(
+            ax,
+            layers_before=layers_before,
+            layers_after=layers_after,
+        )
+    else:
+        for name in materials_to_show:
+            if name not in dsp.MATERIALS:
+                continue
+            nk = material_index(name, wavelengths_m)
+            ax.plot(wl_nm, [z.real for z in nk], label=f"n({name})")
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("n")
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_title("Material refractive index (library)")
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -324,6 +533,7 @@ def plot_rt(
     T: list[float],
     bands: list[BandSpec],
     title: str = "Reflectance & transmittance",
+    layers: list[tuple[str, float]] | None = None,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -333,7 +543,16 @@ def plot_rt(
         ) from exc
 
     wl_nm = [w / _NM for w in wavelengths_m]
-    fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+    if layers:
+        fig = plt.figure(figsize=(9, 9.2))
+        gs = fig.add_gridspec(3, 1, height_ratios=[1.15, 1.0, 0.7])
+        ax0 = fig.add_subplot(gs[0])
+        ax1 = fig.add_subplot(gs[1], sharex=ax0)
+        ax2 = fig.add_subplot(gs[2])
+        axes = [ax0, ax1, ax2]
+    else:
+        fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+        axes = list(axes)
 
     ax = axes[0]
     ax.plot(wl_nm, [100 * r for r in R], color="C0", label="R")
@@ -377,6 +596,9 @@ def plot_rt(
     ax.set_ylim(-2, 105)
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.3)
+
+    if layers:
+        plot_stack_panel(axes[2], layers=layers)
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -456,7 +678,15 @@ def run(cfg: dict, input_path: str, bands_cfg: dict | None = None) -> int:
     csv_path = os.path.join(out_dir, "spectrum.csv")
     plot_path = os.path.join(out_dir, "rt_spectrum.png")
     write_spectrum_csv(csv_path, plot_wls, R, T)
-    plot_rt(plot_path, plot_wls, R, T, bands, title=os.path.basename(input_path))
+    plot_rt(
+        plot_path,
+        plot_wls,
+        R,
+        T,
+        bands,
+        title=os.path.basename(input_path),
+        layers=layers,
+    )
     print(f"\n  wrote {csv_path}")
     print(f"  wrote {plot_path}")
     return 0

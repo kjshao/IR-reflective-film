@@ -591,6 +591,7 @@ def make_txt_best_checkpoint_saver(
                     f"live best  mse={float(cost):.4e}  "
                     f"Δ={delta:+.3e}  #{state['n']}"
                 ),
+                layers=list(layers),
             )
             write_spectrum_csv(
                 os.path.join(out_dir, "spectrum_best.csv"), plot_wls, R, T
@@ -923,6 +924,8 @@ def run(stack_path: str, cfg_path: str) -> int:
         T1,
         plot_bands,
         materials_to_show=[],
+        layers_before=layers0,
+        layers_after=layers_best,
     )
     plot_rt(
         os.path.join(out_dir, "rt_best.png"),
@@ -935,6 +938,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             f"({method.upper()} iter {best_iter}, "
             f"mse={best_cost:.4e}, Δ={best_delta:+.3e})"
         ),
+        layers=layers_best,
     )
     plot_rt(
         os.path.join(out_dir, "rt_final.png"),
@@ -946,6 +950,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             f"{os.path.basename(stack_path)} final "
             f"({method.upper()}, mse={final_cost:.4e}, Δ={final_delta:+.3e})"
         ),
+        layers=layers_final,
     )
     write_stack_txt(
         stack_best,

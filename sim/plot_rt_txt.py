@@ -165,6 +165,7 @@ def run(
         T,
         bands=[],
         title=f"{os.path.basename(stack_path)}  ({wl_lo_nm:g}–{wl_hi_nm:g} nm)",
+        layers=[(f.material, f.thickness_m) for f in films],
     )
     print(f"\n  wrote {csv_path}")
     print(f"  wrote {plot_path}")
