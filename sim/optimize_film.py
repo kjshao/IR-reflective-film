@@ -14,15 +14,12 @@ Initial thicknesses: stack-file values by default. Set ``init.mode`` to
 guess while keeping the material sequence.
 
 Objective: build a piecewise R target (minimize bands → 0, maximize → 1),
-then minimise band-normalized RMSE, optional in-band ripple, and thickness::
+then minimise band-normalized RMSE plus an optional thickness penalty::
 
-    RMSE   = sqrt( Σ_b w_b · mean_{λ∈b} (R − t_b)²  /  Σ_b w_b )
-    ripple = Σ_b (w_b / Σ w) · r_b · (max_b R − min_b R)²
-    L      = RMSE + ripple + thickness_weight · (Σ d / d_ref)²
+    RMSE = sqrt( Σ_b w_b · mean_{λ∈b} (R − t_b)²  /  Σ_b w_b )
+    L    = RMSE + thickness_weight · (Σ d / d_ref)²
 
-``r_b`` is per-band ``ripple_weight`` (falls back to top-level
-``ripple_weight``, default 0). Independent of sample count and absolute
-weight scale for the RMSE term.
+(independent of sample count and absolute weight scale).
 
 Usage::
 
@@ -275,7 +272,6 @@ class RObjectiveBand:
     wl_hi: float
     maximize: bool
     weight: float = 1.0
-    ripple_weight: float = 0.0
 
     def as_band_spec(self) -> BandSpec:
         """Map to BandSpec for grid / shaded plot targets."""
@@ -316,7 +312,6 @@ def parse_r_bands(cfg: dict) -> list[RObjectiveBand]:
         raise ValueError(
             f"n_bands={n_declare} does not match len(bands)={len(raw)}"
         )
-    default_ripple = float(cfg.get("ripple_weight", 0.0))
     out: list[RObjectiveBand] = []
     for i, b in enumerate(raw):
         w = b.get("wavelength_nm")
@@ -331,19 +326,12 @@ def parse_r_bands(cfg: dict) -> list[RObjectiveBand]:
                 f"bands[{i}]: need objective maximize|minimize "
                 "(aliases: R/goal max|min)"
             )
-        if "ripple_weight" in b:
-            r_w = float(b["ripple_weight"])
-        elif "ripple" in b:
-            r_w = float(b["ripple"])
-        else:
-            r_w = default_ripple
         out.append(
             RObjectiveBand(
                 wl_lo=lo * _NM,
                 wl_hi=hi * _NM,
                 maximize=_parse_objective(obj),
                 weight=float(b.get("weight", 1.0)),
-                ripple_weight=r_w,
             )
         )
     return out
@@ -500,28 +488,6 @@ def thickness_penalty(
     return float(thickness_weight) * (total / thickness_ref) ** 2
 
 
-def ripple_penalty(
-    R: Sequence[float],
-    bands: Sequence[RObjectiveBand],
-    wavelengths: Sequence[float],
-) -> float:
-    """Weighted in-band peak-to-peak² using each band's ``ripple_weight``."""
-    band_indices = _band_sample_indices(bands, wavelengths)
-    w_sum = _active_band_weight_sum(bands, band_indices)
-    if w_sum <= 0.0:
-        return 0.0
-    pen = 0.0
-    for b, idx in zip(bands, band_indices):
-        w = max(float(b.weight), 0.0)
-        r_w = max(float(b.ripple_weight), 0.0)
-        if len(idx) < 2 or w <= 0.0 or r_w <= 0.0:
-            continue
-        rs = [R[i] for i in idx]
-        amp = max(rs) - min(rs)
-        pen += r_w * (w / w_sum) * (amp * amp)
-    return pen
-
-
 def build_maxmin_r_residuals(
     layers: Sequence[tuple[str, float]],
     bands: Sequence[RObjectiveBand],
@@ -531,11 +497,10 @@ def build_maxmin_r_residuals(
     thickness_weight: float = 0.0,
     thickness_ref: float = 1000e-9,
 ) -> list[float]:
-    """Residuals for band-normalized L2 fit + per-band ripple + thickness.
+    """Residuals for band-normalized L2 fit + thickness.
 
     Fit residuals are scaled so ``0.5 * sum(r**2)`` equals the band-normalized
-    MSE (= RMSE²). Ripple / thickness residuals match ``ripple_penalty`` /
-    ``thickness_penalty``.
+    MSE (= RMSE²). Thickness residual matches ``thickness_penalty``.
     """
     band_indices = _band_sample_indices(bands, wavelengths)
     w_sum = _active_band_weight_sum(bands, band_indices)
@@ -554,16 +519,6 @@ def build_maxmin_r_residuals(
             for i in idx:
                 res.append(scale * (R[i] - t))
 
-        for b, idx in zip(bands, band_indices):
-            w = max(float(b.weight), 0.0)
-            r_w = max(float(b.ripple_weight), 0.0)
-            if len(idx) < 2 or w <= 0.0 or r_w <= 0.0:
-                continue
-            rs = [R[i] for i in idx]
-            amp = max(rs) - min(rs)
-            # 0.5 r² = r_w · (w/W) · amp²
-            res.append(math.sqrt(2.0 * r_w * w / w_sum) * amp)
-
     if thickness_weight > 0 and layers:
         total = sum(d for _, d in layers)
         res.append(math.sqrt(2.0 * thickness_weight) * total / thickness_ref)
@@ -573,7 +528,7 @@ def build_maxmin_r_residuals(
 
 
 class MaxMinROptimizer(LMThicknessOptimizer):
-    """Adam/LM thickness optimiser: RMSE + optional ripple + thickness."""
+    """Adam/LM thickness optimiser minimizing RMSE + optional thickness."""
 
     def __init__(
         self,
@@ -602,13 +557,11 @@ class MaxMinROptimizer(LMThicknessOptimizer):
         )
 
     def cost(self, layers: Sequence[tuple[str, float]]) -> float:
-        """Band-normalized RMSE + per-band ripple + thickness penalty."""
+        """Band-normalized RMSE + thickness penalty."""
         R, _T = self._rt(layers)
-        return (
-            reflectance_rmse(R, self.rbands, self.wavelengths)
-            + ripple_penalty(R, self.rbands, self.wavelengths)
-            + thickness_penalty(layers, thickness_weight=self.thickness_weight)
-        )
+        return reflectance_rmse(
+            R, self.rbands, self.wavelengths
+        ) + thickness_penalty(layers, thickness_weight=self.thickness_weight)
 
 
 def nk_table(
@@ -1002,15 +955,14 @@ def run(stack_path: str, cfg_path: str) -> int:
             print(f"    {i:2d}. {m:<10} {d / _NM:8.2f}")
     print(
         f"  objective: band-normalized RMSE(R→target) "
-        f"+ per-band ripple + thickness_weight={opt.thickness_weight:g}"
+        f"+ thickness_weight={opt.thickness_weight:g}"
     )
     print(f"  n_bands: {len(rbands)}")
     for b in rbands:
         goal = "maximize→1" if b.maximize else "minimize→0"
         print(
             f"    {b.wl_lo / _NM:.0f}–{b.wl_hi / _NM:.0f} nm  "
-            f"R {goal}  weight={b.weight:g}  "
-            f"ripple_weight={b.ripple_weight:g}"
+            f"R {goal}  weight={b.weight:g}"
         )
 
     plot_lo, plot_hi = cfg.get("plot_wavelength_nm", [400, 1800])
