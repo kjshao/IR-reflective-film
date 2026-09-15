@@ -1,6 +1,6 @@
 # 红外反射膜结构优化程序
 
-根据文本膜系文件（固定 n,k）与波段反射率目标，用 **TMM（传输矩阵法）** 计算光谱，以 **Adam / LM / CG / DE / 模拟退火** 优化各镀膜层厚度（入射介质与基底厚度固定）。
+根据文本膜系文件（固定 n,k）与波段反射率目标，用 **TMM（传输矩阵法）** 计算光谱，以 **Adam / LM / CG / L-BFGS / DE / 模拟退火** 优化各镀膜层厚度（入射介质与基底厚度固定）。
 
 ## 快速开始
 
@@ -31,7 +31,7 @@ sim/.venv/bin/python sim/optimize_film.py \
 1. **文本膜系输入**：`index material thickness_nm n k` 格式（见 `plot_rt_txt.py`）
 2. **多波段 R 目标**：每段设 `R_target`（0–1），或 `objective: maximize|minimize`（默认 1 / 0）
 3. **损失**：波段归一化 RMSE（相对各段 `R_target`）+ 可选 `thickness_weight`
-4. **优化方法**：`adam`（默认）、`lm`、`cg`、`de`、`dual_annealing`；Adam 支持波长 mini-batch
+4. **优化方法**：`adam`（默认）、`lm`、`cg`、`lbfgs`、`de`、`dual_annealing`；Adam 支持波长 mini-batch
 5. **绘图**：matplotlib 输出优化前后 R/T、波段着色，以及实际使用的 n,k
 
 ## 目录结构
@@ -98,8 +98,9 @@ sim/
 
 要点：
 
-- **`method`**：`adam` / `lm` / `cg`（共轭梯度）/ `de` / `dual_annealing`（后两者需 scipy）
+- **`method`**：`adam` / `lm` / `cg` / `lbfgs`（需 scipy）/ `de` / `dual_annealing`（后两者需 scipy）
 - **`cg_initial_step_nm`** / **`cg_max_step_nm`** / **`cg_restart`**：CG 专用（默认分别跟 `adam_lr_nm`、`adam_max_step_nm`、自由层数）
+- **`lbfgs_m`** / **`lbfgs_maxls`**：L-BFGS-B 历史向量数（默认 10）与线搜索最大步数（默认 20）
 - **`R_target`**：写在每个 `bands[]` 上，反射率目标 ∈ [0, 1]；省略时由 `objective` 得到 1（maximize）或 0（minimize）
 - **`nk_source`**：`library`（默认，按材料名从色散库读 n(λ),k(λ)）或 `fixed`（用文本膜系中的常数 n,k）；也可用 `use_fixed_nk: true`
 - **`min_thickness_nm`**：单层最小厚度（nm，默认 `8`）；优化时抬高各材料厚度下界

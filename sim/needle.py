@@ -530,6 +530,8 @@ def make_optimizer_from_config(
         cg_initial_step=cfg.get("cg_initial_step"),
         cg_max_step=cfg.get("cg_max_step"),
         cg_restart=cfg.get("cg_restart"),
+        lbfgs_m=int(cfg.get("lbfgs_m", 10)),
+        lbfgs_maxls=int(cfg.get("lbfgs_maxls", 20)),
         mini_batch=bool(cfg.get("mini_batch", False)),
         batch_size=int(cfg.get("batch_size", 8)),
         n_batches=cfg.get("n_batches"),

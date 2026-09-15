@@ -40,7 +40,8 @@ Training modes (``method=adam``):
     One Adam step per batch; full-grid cost is recorded per epoch.
 
 Other local methods: ``method=lm`` (Gauss–Newton on residuals),
-``method=cg`` (Polak–Ribière nonlinear CG on the scalar loss).
+``method=cg`` (Polak–Ribière nonlinear CG on the scalar loss),
+``method=lbfgs`` (scipy L-BFGS-B on the scalar loss; needs scipy).
 """
 
 from __future__ import annotations
@@ -908,6 +909,8 @@ def run(stack_path: str, cfg_path: str) -> int:
         cg_restart=(
             int(cfg["cg_restart"]) if cfg.get("cg_restart") is not None else None
         ),
+        lbfgs_m=int(cfg.get("lbfgs_m", 10)),
+        lbfgs_maxls=int(cfg.get("lbfgs_maxls", 20)),
         min_thickness=_NM * float(cfg.get("min_thickness_nm", 8.0)),
         mini_batch=mini_batch and method == "adam",
         batch_size=batch_size,
@@ -1329,7 +1332,7 @@ def main(argv: list[str] | None = None) -> int:
         "config",
         nargs="?",
         default=os.path.join(here, "examples", "example_optimize_film.json"),
-        help="JSON with bands[].R_target / objective, method=adam|lm|cg|de|dual_annealing",
+        help="JSON with bands[].R_target / objective, method=adam|lm|cg|lbfgs|de|dual_annealing",
     )
     args = ap.parse_args(argv)
     return run(args.stack, args.config)

@@ -122,7 +122,7 @@ def resolve_global_polish_method(
     *,
     global_polish_lm: bool | None = None,
 ) -> str:
-    """Return ``none`` | ``lm`` | ``adam`` | ``cg`` for post-global local polish."""
+    """Return ``none`` | ``lm`` | ``adam`` | ``cg`` | ``lbfgs`` for polish."""
     if method is not None and str(method).strip() != "":
         m = str(method).lower().strip()
         aliases = {
@@ -138,10 +138,15 @@ def resolve_global_polish_method(
             "conjugate_gradient": "cg",
             "conjugate-gradient": "cg",
             "ncg": "cg",
+            "lbfgs": "lbfgs",
+            "l-bfgs": "lbfgs",
+            "lbfgsb": "lbfgs",
+            "l-bfgs-b": "lbfgs",
         }
         if m not in aliases:
             raise ValueError(
-                f"unknown global_polish_method {method!r}; use none|lm|adam|cg"
+                f"unknown global_polish_method {method!r}; "
+                "use none|lm|adam|cg|lbfgs"
             )
         return aliases[m]
     if global_polish_lm:
@@ -365,14 +370,14 @@ def _require_scipy():
         import scipy.optimize as spo
     except ImportError as exc:
         raise SystemExit(
-            "scipy is required for global methods "
-            "('de' / 'dual_annealing'); pip install scipy"
+            "scipy is required for 'lbfgs', 'de', and 'dual_annealing'; "
+            "pip install scipy"
         ) from exc
     return spo
 
 
 class LMThicknessOptimizer:
-    """Thickness optimiser: LM, Adam, CG, or scipy global (DE / dual annealing)."""
+    """Thickness optimiser: LM, Adam, CG, L-BFGS-B, or scipy global methods."""
 
     def __init__(
         self,
@@ -402,6 +407,9 @@ class LMThicknessOptimizer:
         cg_initial_step: float | None = None,
         cg_max_step: float | None = None,
         cg_restart: int | None = None,
+        # L-BFGS-B (scipy) on scalar cost with thickness bounds.
+        lbfgs_m: int = 10,
+        lbfgs_maxls: int = 20,
         # Mini-batch Adam (wavelength subsets). Off by default → full-grid Adam.
         mini_batch: bool = False,
         batch_size: int = 8,
@@ -457,6 +465,8 @@ class LMThicknessOptimizer:
             float(adam_max_step) if cg_max_step is None else float(cg_max_step)
         )
         self.cg_restart = None if cg_restart is None else max(1, int(cg_restart))
+        self.lbfgs_m = max(1, int(lbfgs_m))
+        self.lbfgs_maxls = max(1, int(lbfgs_maxls))
         self.min_thickness = float(min_thickness)
         self.mini_batch = bool(mini_batch)
         self.batch_size = int(batch_size)
@@ -827,6 +837,15 @@ class LMThicknessOptimizer:
             return self._optimize_cg(
                 layers, free_indices=free_indices, verbose=verbose
             )
+        if self.method in (
+            "lbfgs",
+            "l-bfgs",
+            "lbfgsb",
+            "l-bfgs-b",
+        ):
+            return self._optimize_lbfgs(
+                layers, free_indices=free_indices, verbose=verbose
+            )
         global_name = _GLOBAL_METHODS.get(self.method)
         if global_name == "de":
             return self._optimize_differential_evolution(
@@ -839,7 +858,7 @@ class LMThicknessOptimizer:
         if self.method not in ("lm", "levenberg", "levenberg-marquardt"):
             raise ValueError(
                 f"unknown optimizer method {self.method!r}; "
-                "use 'lm', 'adam', 'cg', 'de', or 'dual_annealing'"
+                "use 'lm', 'adam', 'cg', 'lbfgs', 'de', or 'dual_annealing'"
             )
         return self._optimize_lm(layers, free_indices=free_indices, verbose=verbose)
 
@@ -1002,6 +1021,10 @@ class LMThicknessOptimizer:
                 self.mini_batch = saved_mb
         elif polish == "cg":
             polished = self._optimize_cg(
+                layers, free_indices=free_indices, verbose=verbose
+            )
+        elif polish == "lbfgs":
+            polished = self._optimize_lbfgs(
                 layers, free_indices=free_indices, verbose=verbose
             )
         else:
@@ -1560,6 +1583,189 @@ class LMThicknessOptimizer:
             best_iter=best_iter,
             final_layers=list(zip(materials, x)),
             final_cost=cost,
+            start_cost=start_cost,
+        )
+
+    def _optimize_lbfgs(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        """Bounded L-BFGS-B on ``self.cost()`` via scipy (needs scipy)."""
+        spo = _require_scipy()
+        materials = [m for m, _ in layers]
+        x = self._project(materials, [d for _, d in layers])
+        free = list(range(len(x))) if free_indices is None else list(free_indices)
+        if not free:
+            layers0 = list(zip(materials, x))
+            c0 = self.cost(layers0)
+            return self._make_result(
+                best_layers=layers0,
+                best_cost=c0,
+                best_r=self.residuals(layers0),
+                n_iter=0,
+                success=False,
+                message="no_free",
+                history=[c0],
+                best_iter=0,
+                final_layers=layers0,
+                final_cost=c0,
+                start_cost=c0,
+            )
+
+        bounds = [_bounds_for(materials[j], self.min_thickness) for j in free]
+        x0_free = [x[j] for j in free]
+        layers0 = list(zip(materials, x))
+        r = self.residuals(layers0)
+        cost = self.cost(layers0)
+        history = [cost]
+        start_cost = cost
+        x0 = list(x)
+        best_x, best_cost, best_r, best_iter = list(x), cost, r, 0
+        self._begin_run(x0, start_cost)
+        n_improve = 0
+        pending_best = False
+        state = {"it": 0, "x": list(x), "cost": cost, "r": r}
+
+        def _unpack(x_free: Sequence[float]) -> list[float]:
+            xf = list(state["x"])
+            for j, v in zip(free, x_free):
+                xf[j] = float(v)
+            return self._project(materials, xf)
+
+        if verbose:
+            print(
+                f"    L-BFGS-B start: cost={cost:.6e}  layers={len(materials)}  "
+                f"free={len(free)}  m={self.lbfgs_m}  maxiter={self.max_iter}",
+                flush=True,
+            )
+        self._notify_best(
+            list(zip(materials, x)),
+            cost,
+            stage="lbfgs_start",
+            iter=0,
+            n_improve=0,
+        )
+
+        def fun(x_free):
+            x_full = _unpack(x_free)
+            layers_now = list(zip(materials, x_full))
+            c = self.cost(layers_now)
+            return float(c)
+
+        def jac(x_free):
+            x_full = _unpack(x_free)
+            layers_now = list(zip(materials, x_full))
+            c = self.cost(layers_now)
+            g, _ = self._cost_gradient(materials, x_full, c, free)
+            return [g[j] for j in free]
+
+        def callback(x_free, *_args):
+            nonlocal best_x, best_cost, best_r, best_iter, n_improve, pending_best
+            state["it"] += 1
+            it = state["it"]
+            x_full = _unpack(x_free)
+            layers_now = list(zip(materials, x_full))
+            c = self.cost(layers_now)
+            rr = self.residuals(layers_now)
+            state["x"] = list(x_full)
+            state["cost"] = c
+            state["r"] = rr
+            history.append(c)
+            if self._accept_best(x_full, c, best_x, best_cost):
+                best_x, best_cost, best_r, best_iter = list(x_full), c, rr, it
+                n_improve += 1
+                pending_best = True
+            done = it >= self.max_iter or best_cost < self.tol
+            if pending_best and self._local_checkpoint_due(it, final=done):
+                self._notify_best(
+                    list(zip(materials, best_x)),
+                    best_cost,
+                    stage="lbfgs",
+                    iter=it,
+                    n_improve=n_improve,
+                )
+                pending_best = False
+            if verbose and (it == 1 or it % 5 == 0 or it == self.max_iter):
+                print(
+                    f"    L-BFGS-B iter {it:3d}: cost={c:.6e}  "
+                    f"best={best_cost:.6e}@iter{best_iter}  "
+                    f"Δ={best_cost - start_cost:+.3e}  "
+                    f"Σd={sum(best_x)*1e9:.1f} nm",
+                    flush=True,
+                )
+
+        options = {
+            "maxiter": int(self.max_iter),
+            "maxfun": int(max(20, self.max_iter * 20)),
+            "ftol": float(self.tol),
+            "gtol": float(max(self.tol, 1e-12)),
+            "maxcor": int(self.lbfgs_m),
+            "maxls": int(self.lbfgs_maxls),
+        }
+        # Older scipy used factr; ftol is preferred on recent versions.
+        try:
+            result = spo.minimize(
+                fun,
+                x0_free,
+                method="L-BFGS-B",
+                jac=jac,
+                bounds=bounds,
+                callback=callback,
+                options=options,
+            )
+        except TypeError:
+            # Very old scipy callback signature / options differences.
+            options.pop("ftol", None)
+            options["factr"] = max(1.0, 1e2 / max(self.tol, 1e-15))
+            result = spo.minimize(
+                fun,
+                x0_free,
+                method="L-BFGS-B",
+                jac=jac,
+                bounds=bounds,
+                callback=callback,
+                options=options,
+            )
+
+        x_final = _unpack(result.x)
+        layers_final = list(zip(materials, x_final))
+        final_cost = self.cost(layers_final)
+        final_r = self.residuals(layers_final)
+        # Catch a last improvement not seen by callback.
+        if self._accept_best(x_final, final_cost, best_x, best_cost):
+            best_x, best_cost, best_r = list(x_final), final_cost, final_r
+            best_iter = max(best_iter, state["it"])
+            n_improve += 1
+            pending_best = True
+
+        n_iter = max(state["it"], int(getattr(result, "nit", 0) or 0))
+        if pending_best:
+            self._notify_best(
+                list(zip(materials, best_x)),
+                best_cost,
+                stage="lbfgs",
+                iter=n_iter,
+                n_improve=n_improve,
+            )
+
+        msg = str(getattr(result, "message", "lbfgs"))
+        if isinstance(msg, bytes):
+            msg = msg.decode("utf-8", errors="replace")
+        success = bool(getattr(result, "success", False)) or best_cost < start_cost
+        return self._make_result(
+            best_layers=list(zip(materials, best_x)),
+            best_cost=best_cost,
+            best_r=best_r,
+            n_iter=n_iter,
+            success=success,
+            message=msg if msg else ("converged" if success else "lbfgs"),
+            history=history,
+            best_iter=best_iter,
+            final_layers=layers_final,
+            final_cost=final_cost,
             start_cost=start_cost,
         )
 
