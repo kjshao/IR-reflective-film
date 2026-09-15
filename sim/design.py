@@ -191,9 +191,13 @@ BOUNDS = {
     "ag": (8e-9, 20e-9),
     "ito": (15e-9, 120e-9),
     "tio2": (20e-9, 300e-9),
+    "tio2_pvd": (20e-9, 300e-9),
+    "tio2_eb": (20e-9, 300e-9),
+    "tio2_amorphous": (20e-9, 300e-9),
     "tio2_a": (20e-9, 300e-9),
     "tio2_rutile": (20e-9, 300e-9),
     "sio2": (20e-9, 320e-9),
+    "sio2_fused": (20e-9, 320e-9),
 }
 
 
@@ -276,7 +280,10 @@ def print_dispersion():
     header = f"  {'material':>12} " + " ".join(f"{int(w * 1e9):>16}nm" for w in
                                              (450e-9, 550e-9, 700e-9, 1000e-9, 1300e-9))
     print(header)
-    for name in ("air", "sio2", "tio2_a", "tio2_rutile", "glass", "ag", "ito"):
+    for name in (
+        "air", "sio2", "sio2_fused", "tio2", "tio2_eb", "tio2_amorphous",
+        "tio2_a", "tio2_rutile", "glass", "ag", "ito",
+    ):
         row = f"  {name:>12} "
         for w in (450e-9, 550e-9, 700e-9, 1000e-9, 1300e-9):
             n = dsp.material_n(name, w)
@@ -331,7 +338,10 @@ def write_spectrum(path, layers, substrate="glass"):
 def write_oghma_materials():
     """Emit oghma_local/materials-style n.csv and alpha.csv for each material."""
     root = os.path.join(OUT_DIR, "oghma_materials")
-    for name in ("ag", "ito", "tio2", "tio2_a", "tio2_rutile", "sio2", "glass", "pet", "air"):
+    for name in (
+        "ag", "ito", "tio2", "tio2_eb", "tio2_amorphous", "tio2_a",
+        "tio2_rutile", "sio2", "sio2_fused", "glass", "pet", "air",
+    ):
         folder = os.path.join(root, name)
         os.makedirs(folder, exist_ok=True)
         fn = lambda wl, n=name: dsp.material_n(n, wl)

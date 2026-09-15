@@ -3,9 +3,11 @@
 Every model returns the complex refractive index N = n + i*k with the
 convention Im(N) >= 0. Wavelengths are in metres.
 
-Sources (see ``materials/SOURCES.md``) are taken from the public-domain
-refractiveindex.info database unless noted. Models cover the VIS–NIR band
-used by this project; do not extrapolate far outside the documented range
+**Defaults are PVD-oriented** (sputtered / evaporated thin films): ``sio2`` →
+Lemarchand sputter, ``tio2`` → NIST RF-sputter, ``ag`` → McPeak evaporated Ag,
+``ito`` → König commercial film. Crystal / annealed references remain under
+explicit keys (``tio2_rutile``, ``tio2_a``, ``sio2_fused``). See
+``materials/SOURCES.md``. Do not extrapolate far outside each table's range
 without checking the original record.
 """
 
@@ -26,6 +28,12 @@ _TIO2_A_SEL_A = 5.581208
 _TIO2_A_SEL_B = 0.166074
 _TIO2_A_SEL_C = 0.081000  # µm²
 _TIO2_A_TABLE_MAX_UM = 0.82656
+
+# Amorphous ALD TiO2 (Jolivet @ 200 °C) NIR extension.
+_TIO2_AM_SEL_A = 5.369819
+_TIO2_AM_SEL_B = 0.142209
+_TIO2_AM_SEL_C = 0.075500
+_TIO2_AM_TABLE_MAX_UM = 0.821
 
 # Rutile ordinary ray: Jellison 2024 Sellmeier (VIS) + Bond 1965 (NIR).
 # n² = 1 + A λ²/(λ² − λo²), λ in µm; Ao=4.8393, λoo=241.89 nm.
@@ -100,6 +108,11 @@ def _formula6_ciddor(wl, coefficients):
 # Extra aliases after hyphen→underscore normalisation.
 _ALIASES = {
     "tio2a": "tio2_a",
+    "tio2anatase": "tio2_a",
+    "tio2rutile": "tio2_rutile",
+    "tio2sputter": "tio2_pvd",
+    "tio2pvd": "tio2_pvd",
+    "sio2pvd": "sio2",
 }
 
 
@@ -280,29 +293,86 @@ def air(wl: float) -> complex:
 
 
 def silver(wl: float) -> complex:
-    """Drude model for magnetron-sputtered Ag (order-of-magnitude)."""
-    return _drude_lorentz(wl, eps_inf=5.0, e_plasma=9.5, gamma=0.0987)
+    """Thermally evaporated Ag (McPeak et al. 2015); PVD-relevant.
+
+    Template-stripped evaporated film. Table ~0.30–1.70 µm; outside the
+    table the nearest endpoint is used. Prefer this over the old Drude toy
+    model for coating stacks that include Ag.
+    """
+    wl_um = wl * 1e6
+    return _interp_nk(_load_nk_table("ag_mcpeak.csv"), wl_um)
 
 
 def ito(wl: float) -> complex:
-    """Drude model for moderate-carrier-density ITO (n(550 nm) ~ 1.93)."""
-    return _drude_lorentz(wl, eps_inf=3.9, e_plasma=0.95, gamma=0.12)
+    """Commercial ITO thin film (König et al. 2014) with Drude NIR tail.
+
+    Tabulated ~0.25–1.0 µm (72 nm ITO on BK7, Delta Technology).
+    For λ beyond the table a moderate-carrier Drude model is used, offset so
+    N is continuous at the join (sheet resistance still process-dependent).
+    """
+    wl_um = wl * 1e6
+    table = _load_nk_table("ito_konig.csv")
+    wl_join = table[-1][0]
+    if wl_um <= wl_join * (1.0 + 1e-12):
+        return _interp_nk(table, wl_um)
+    n_join = complex(table[-1][1], table[-1][2])
+    n_drude_join = _drude_lorentz(
+        wl_join * 1e-6, eps_inf=3.9, e_plasma=0.95, gamma=0.12
+    )
+    n_drude = _drude_lorentz(wl, eps_inf=3.9, e_plasma=0.95, gamma=0.12)
+    return n_drude + (n_join - n_drude_join)
 
 
 def sio2(wl: float) -> complex:
-    """Fused silica n,k from Franta et al. 2016 (tabulated).
+    """Magnetron-sputtered SiO₂ film (Lemarchand / Gao 2012–13).
 
-    n agrees with Malitson 1965 to ~2×10⁻⁴ in the visible. Table spans
-    ~0.20–5.0 µm (downsampled from refractiveindex.info).
+    Default low-index layer for PVD multilayers. 580 nm sputtered monolayer
+    on BK7; tabulated ~0.25–2.5 µm. n(550 nm) ≈ 1.475.
     """
+    return _interp_nk(_load_nk_table("sio2_pvd_lemarchand.csv"), wl * 1e6)
+
+
+def sio2_fused(wl: float) -> complex:
+    """Bulk fused silica (Franta et al. 2016); higher-density reference."""
     return _interp_nk(_load_nk_table("sio2_franta.csv"), wl * 1e6)
+
+
+def tio2_pvd(wl: float) -> complex:
+    """RF-sputtered TiO₂ film (NIST Wang 2014) — default PVD high-index.
+
+    Denton Discovery 550, 400 W, 7 mTorr Ar. VIS–NIR from sputter ellipsometry;
+    λ > 1.35 µm extended with Franta e-beam n scaled for continuity.
+    n(550 nm) ≈ 2.36 (typical dense sputtered oxide, below crystal rutile).
+    """
+    return _interp_nk(_load_nk_table("tio2_pvd_sputter.csv"), wl * 1e6)
+
+
+def tio2_eb(wl: float) -> complex:
+    """E-beam evaporated TiO₂ (Franta 2015), amorphous / fine polycrystalline.
+
+    Alternative PVD route (evaporation). n(550 nm) ≈ 2.35; wide IR coverage.
+    """
+    return _interp_nk(_load_nk_table("tio2_pvd_franta.csv"), wl * 1e6)
+
+
+def tio2_amorphous(wl: float) -> complex:
+    """ALD amorphous TiO₂ @ 200 °C (Jolivet et al. 2023).
+
+    Tabulated to ~0.82 µm; longer λ uses a Sellmeier fit, k → 0.
+    """
+    wl_um = wl * 1e6
+    table = _load_nk_table("tio2_amorphous_jolivet.csv")
+    if wl_um <= _TIO2_AM_TABLE_MAX_UM:
+        return _interp_nk(table, wl_um)
+    n = _formula4_devore(wl, _TIO2_AM_SEL_A, _TIO2_AM_SEL_B, _TIO2_AM_SEL_C)
+    return complex(n, 0.0)
 
 
 def tio2_a(wl: float) -> complex:
     """TiO₂ anatase thin film (Jolivet et al. 2023, ALD @ 300 °C).
 
-    Tabulated n,k for ~0.25–0.827 µm. For longer wavelengths, n is extended
-    with a Devore-style Sellmeier fit to the transparent region and k → 0.
+    Use for annealed / crystalline anatase-like coatings (higher n than
+    as-deposited PVD). Tabulated ~0.25–0.827 µm; NIR Sellmeier extension.
     """
     wl_um = wl * 1e6
     table = _load_nk_table("tio2_a_jolivet.csv")
@@ -313,16 +383,10 @@ def tio2_a(wl: float) -> complex:
 
 
 def tio2_rutile(wl: float) -> complex:
-    """TiO₂ rutile ordinary ray: Jellison 2024 + Bond 1965.
+    """TiO₂ rutile ordinary ray: Jellison 2024 + Bond 1965 (crystal upper bound).
 
-    * **n (λ ≤ 0.85 µm):** Jellison et al. Sellmeier (Ao=4.8393, λo=241.89 nm),
-      fit window 0.45–0.85 µm.
-    * **n (λ ≥ 0.95 µm):** Bond 1965 tabulated n_o (to 2.4 µm).
-    * **n (0.85–0.95 µm):** linear blend between the two.
-    * **k:** Jellison polarized-transmission Urbach tail (ordinary);
-      ≈0 through the VIS–NIR; rises only near/below ~410 nm.
-
-    Polycrystalline coatings are usually closer to n_o than n_e.
+    Not representative of typical as-deposited PVD; use for annealed/dense
+    crystalline reference or optimistic index contrast.
     """
     n = _rutile_n_combined(wl * 1e6)
     k = _rutile_k_urbach(wl)
@@ -330,8 +394,8 @@ def tio2_rutile(wl: float) -> complex:
 
 
 def tio2(wl: float) -> complex:
-    """Backward-compatible alias for anatase ``tio2_a``."""
-    return tio2_a(wl)
+    """Default TiO₂ for PVD stacks → ``tio2_pvd`` (RF-sputtered)."""
+    return tio2_pvd(wl)
 
 
 def glass(wl: float) -> complex:
@@ -341,7 +405,6 @@ def glass(wl: float) -> complex:
     n_d ≈ 1.5115; Corning Gorilla Glass core is ≈ 1.50 @ 590 nm — similar
     class, slightly lower index. Includes catalog tabulated k.
     """
-    # formula 2 coefficients from AF32ECO.yml
     n = _formula2(
         wl,
         (
@@ -368,7 +431,13 @@ MATERIALS = {
     "ag": silver,
     "ito": ito,
     "sio2": sio2,
-    "tio2": tio2,  # alias → anatase
+    "sio2_fused": sio2_fused,
+    "sio2_pvd": sio2,  # alias
+    "tio2": tio2,
+    "tio2_pvd": tio2_pvd,
+    "tio2_sputter": tio2_pvd,
+    "tio2_eb": tio2_eb,
+    "tio2_amorphous": tio2_amorphous,
     "tio2_a": tio2_a,
     "tio2_rutile": tio2_rutile,
     "glass": glass,

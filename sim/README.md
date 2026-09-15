@@ -46,7 +46,7 @@ sim/
   needle.py             # 逐层增加法（独立模块，供高级设计使用）
   tmm.py                # 传输矩阵核心
   dispersion.py         # 材料色散库（n+ik；见 materials/SOURCES.md）
-  materials/            # 表列 n,k 数据（Franta SiO2、Jolivet anatase 等）
+  materials/            # PVD 优先的表列 n,k（SOURCES.md；NK_TABLES_300_1800.md）
   design.py             # 既有 OMO/OMOMO 评估脚本（无优化）
   requirements.txt
   examples/

@@ -12,9 +12,15 @@ from rt_calculator import RTCalculator
 # Default physical bounds for dielectric layers (metres).
 DEFAULT_BOUNDS = {
     "tio2": (5e-9, 500e-9),
+    "tio2_pvd": (5e-9, 500e-9),
+    "tio2_sputter": (5e-9, 500e-9),
+    "tio2_eb": (5e-9, 500e-9),
+    "tio2_amorphous": (5e-9, 500e-9),
     "tio2_a": (5e-9, 500e-9),
     "tio2_rutile": (5e-9, 500e-9),
     "sio2": (5e-9, 550e-9),
+    "sio2_pvd": (5e-9, 550e-9),
+    "sio2_fused": (5e-9, 550e-9),
     "ito": (15e-9, 150e-9),
     "ag": (6e-9, 25e-9),
     "glass": (50e-9, 500e-9),
