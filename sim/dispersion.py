@@ -3,10 +3,10 @@
 Every model returns the complex refractive index N = n + i*k with the
 convention Im(N) >= 0. Wavelengths are in metres.
 
-**Defaults are PVD-oriented** (sputtered / evaporated thin films): ``sio2`` →
-Lemarchand sputter, ``tio2`` → NIST RF-sputter, ``ag`` → McPeak evaporated Ag,
-``ito`` → König commercial film. Crystal / annealed references remain under
-explicit keys (``tio2_rutile``, ``tio2_a``, ``sio2_fused``). See
+**Defaults are PVD-oriented** for high-index / metals (``tio2`` → NIST
+RF-sputter, ``ag`` → McPeak evaporated Ag, ``ito`` → König commercial film).
+``sio2`` defaults to **fused silica** (Franta); use ``sio2_pvd`` for sputtered
+SiO₂. Crystal / annealed TiO₂ remain under ``tio2_rutile``, ``tio2_a``. See
 ``materials/SOURCES.md``. Do not extrapolate far outside each table's range
 without checking the original record.
 """
@@ -112,7 +112,8 @@ _ALIASES = {
     "tio2rutile": "tio2_rutile",
     "tio2sputter": "tio2_pvd",
     "tio2pvd": "tio2_pvd",
-    "sio2pvd": "sio2",
+    "sio2pvd": "sio2_pvd",
+    "sio2fused": "sio2_fused",
 }
 
 
@@ -324,17 +325,26 @@ def ito(wl: float) -> complex:
 
 
 def sio2(wl: float) -> complex:
-    """Magnetron-sputtered SiO₂ film (Lemarchand / Gao 2012–13).
+    """Fused silica (Franta et al. 2016) — default low-index layer.
 
-    Default low-index layer for PVD multilayers. 580 nm sputtered monolayer
-    on BK7; tabulated ~0.25–2.5 µm. n(550 nm) ≈ 1.475.
+    Bulk/fused reference matching Malitson n to ~2×10⁻⁴ in the visible.
+    For magnetron-sputtered film data use ``sio2_pvd``.
     """
-    return _interp_nk(_load_nk_table("sio2_pvd_lemarchand.csv"), wl * 1e6)
+    return _interp_nk(_load_nk_table("sio2_franta.csv"), wl * 1e6)
 
 
 def sio2_fused(wl: float) -> complex:
-    """Bulk fused silica (Franta et al. 2016); higher-density reference."""
-    return _interp_nk(_load_nk_table("sio2_franta.csv"), wl * 1e6)
+    """Alias for default ``sio2`` (Franta fused silica)."""
+    return sio2(wl)
+
+
+def sio2_pvd(wl: float) -> complex:
+    """Magnetron-sputtered SiO₂ film (Lemarchand / Gao 2012–13).
+
+    580 nm sputtered monolayer on BK7; tabulated ~0.25–2.5 µm.
+    n(550 nm) ≈ 1.475 (slightly above fused silica).
+    """
+    return _interp_nk(_load_nk_table("sio2_pvd_lemarchand.csv"), wl * 1e6)
 
 
 def tio2_pvd(wl: float) -> complex:
@@ -432,7 +442,7 @@ MATERIALS = {
     "ito": ito,
     "sio2": sio2,
     "sio2_fused": sio2_fused,
-    "sio2_pvd": sio2,  # alias
+    "sio2_pvd": sio2_pvd,
     "tio2": tio2,
     "tio2_pvd": tio2_pvd,
     "tio2_sputter": tio2_pvd,

@@ -14,8 +14,8 @@ under explicit keys. Numeric tables are derived from the public-domain
 | Key | Material | Source | Notes / PVD relevance |
 |-----|----------|--------|------------------------|
 | `air` | Standard air | Ciddor 1996 (formula) | dry air 15 °C, 101.325 kPa, 450 ppm CO₂; k = 0 |
-| `sio2` / `sio2_pvd` | Sputtered SiO₂ | Lemarchand / Gao 2012–13 | **default L**; 580 nm magnetron film on BK7; n(550)≈1.475 |
-| `sio2_fused` | Fused silica (bulk) | Franta et al. 2016 | denser reference; n≈Malitson |
+| `sio2` / `sio2_fused` | Fused silica (bulk) | Franta et al. 2016 | **default L**; n≈Malitson; n(550)≈1.460 |
+| `sio2_pvd` | Sputtered SiO₂ | Lemarchand / Gao 2012–13 | magnetron film on BK7; n(550)≈1.475 |
 | `tio2` / `tio2_pvd` / `tio2_sputter` | RF-sputtered TiO₂ | NIST Wang 2014 + Franta IR | **default H**; Denton Discovery 550; n(550)≈2.36; λ>1.35 µm scaled Franta |
 | `tio2_eb` | E-beam TiO₂ | Franta et al. 2015 | evaporated amorphous/fine poly; n(550)≈2.35 |
 | `tio2_amorphous` | Amorphous TiO₂ | Jolivet et al. 2023 @ 200 °C | ALD; NIR Sellmeier beyond ~0.82 µm |
@@ -29,16 +29,16 @@ under explicit keys. Numeric tables are derived from the public-domain
 ## Why PVD films differ from crystal
 
 As-deposited sputtered / evaporated oxides are usually **less dense** than
-single-crystal rutile or fused silica, so **n is lower**. Annealing or
-ion-assist densification raises n toward the crystalline references
-(`tio2_a`, `tio2_rutile`, `sio2_fused`).
+single-crystal rutile, so **n is lower**. Annealing or ion-assist densification
+raises n toward crystalline references (`tio2_a`, `tio2_rutile`). Sputtered
+SiO₂ (`sio2_pvd`) is slightly higher-n than fused silica (`sio2`).
 
 Typical VIS indices used here:
 
 | Material | n @ 550 nm | Role |
 |----------|------------|------|
-| `sio2` (sputter) | ≈ 1.475 | default low-index |
-| `sio2_fused` | ≈ 1.460 | bulk silica |
+| `sio2` / `sio2_fused` | ≈ 1.460 | **default** low-index |
+| `sio2_pvd` (sputter) | ≈ 1.475 | PVD film alternative |
 | `tio2` (sputter) | ≈ 2.36 | default high-index |
 | `tio2_eb` | ≈ 2.35 | e-beam alternative |
 | `tio2_a` (anatase) | ≈ 2.49 | annealed ALD |
@@ -48,8 +48,8 @@ Typical VIS indices used here:
 
 | CSV | Used by |
 |-----|---------|
-| `sio2_pvd_lemarchand.csv` | `sio2` |
-| `sio2_franta.csv` | `sio2_fused` |
+| `sio2_franta.csv` | `sio2` / `sio2_fused` |
+| `sio2_pvd_lemarchand.csv` | `sio2_pvd` |
 | `tio2_pvd_sputter.csv` | `tio2` / `tio2_pvd` |
 | `tio2_pvd_franta.csv` | `tio2_eb` |
 | `tio2_amorphous_jolivet.csv` | `tio2_amorphous` |
