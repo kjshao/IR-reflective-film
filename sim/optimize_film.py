@@ -13,13 +13,15 @@ Initial thicknesses: stack-file values by default. Set ``init.mode`` to
 ``random_uniform``, or ``random_init: true``, to draw a reproducible random
 guess while keeping the material sequence.
 
-Objective: build a piecewise R target (minimize bands → 0, maximize → 1),
-then minimise band-normalized RMSE plus an optional thickness penalty::
+Objective: build a piecewise R target per band, then minimise band-normalized
+RMSE plus an optional thickness penalty::
 
     RMSE = sqrt( Σ_b w_b · mean_{λ∈b} (R − t_b)²  /  Σ_b w_b )
     L    = RMSE + thickness_weight · (Σ d / d_ref)²
 
-(independent of sample count and absolute weight scale).
+Each band sets ``t_b`` via ``R_target`` (0–1). If omitted, ``objective:
+maximize|minimize`` defaults to ``t_b = 1`` or ``0``. Independent of sample
+count and absolute weight scale.
 
 Usage::
 
@@ -266,29 +268,31 @@ def require_library_materials(*names: str) -> None:
 
 @dataclass
 class RObjectiveBand:
-    """One wavelength interval with a reflectance max or min objective."""
+    """One wavelength interval with a reflectance target ``r_target``."""
 
     wl_lo: float
     wl_hi: float
     maximize: bool
     weight: float = 1.0
+    r_target: float = 0.0
 
     def as_band_spec(self) -> BandSpec:
         """Map to BandSpec for grid / shaded plot targets."""
+        t = float(self.r_target)
         if self.maximize:
             return BandSpec(
                 wl_lo=self.wl_lo,
                 wl_hi=self.wl_hi,
-                R_min=0.9,
+                R_min=min(0.9, max(0.0, t - 0.05)),
                 weight=self.weight,
-                R_target=1.0,
+                R_target=t,
             )
         return BandSpec(
             wl_lo=self.wl_lo,
             wl_hi=self.wl_hi,
-            R_max=0.1,
+            R_max=max(0.1, min(1.0, t + 0.05)),
             weight=self.weight,
-            R_target=0.0,
+            R_target=t,
         )
 
 
@@ -320,18 +324,36 @@ def parse_r_bands(cfg: dict) -> list[RObjectiveBand]:
         lo, hi = float(w[0]), float(w[1])
         if hi <= lo:
             raise ValueError(f"bands[{i}]: invalid range {lo}–{hi} nm")
+
         obj = b.get("objective", b.get("R", b.get("goal")))
-        if obj is None:
+        t_raw = b.get("R_target", b.get("r_target", b.get("target")))
+        if obj is None and t_raw is None:
             raise ValueError(
-                f"bands[{i}]: need objective maximize|minimize "
-                "(aliases: R/goal max|min)"
+                f"bands[{i}]: need objective maximize|minimize and/or "
+                "R_target in [0, 1]"
             )
+
+        if t_raw is not None:
+            t = float(t_raw)
+            if not (0.0 <= t <= 1.0):
+                raise ValueError(
+                    f"bands[{i}]: R_target must be in [0, 1], got {t_raw!r}"
+                )
+        else:
+            t = 1.0 if _parse_objective(obj) else 0.0
+
+        if obj is not None:
+            maximize = _parse_objective(obj)
+        else:
+            maximize = t >= 0.5
+
         out.append(
             RObjectiveBand(
                 wl_lo=lo * _NM,
                 wl_hi=hi * _NM,
-                maximize=_parse_objective(obj),
+                maximize=maximize,
                 weight=float(b.get("weight", 1.0)),
+                r_target=t,
             )
         )
     return out
@@ -401,14 +423,14 @@ def build_r_target_curve(
     bands: Sequence[RObjectiveBand],
     wavelengths: Sequence[float],
 ) -> tuple[list[float | None], list[float]]:
-    """Piecewise R target: maximize→1, minimize→0; None outside all bands.
+    """Piecewise R target from each band's ``r_target``; None outside bands.
 
     If bands overlap, the last listed band wins for that wavelength.
     """
     targets: list[float | None] = [None] * len(wavelengths)
     weights = [0.0] * len(wavelengths)
     for b in bands:
-        t = 1.0 if b.maximize else 0.0
+        t = float(b.r_target)
         w = max(float(b.weight), 0.0)
         for i, wl in enumerate(wavelengths):
             if b.wl_lo - 1e-15 <= wl <= b.wl_hi + 1e-15:
@@ -469,7 +491,7 @@ def reflectance_rmse(
         w = max(float(b.weight), 0.0)
         if not idx or w <= 0.0:
             continue
-        t = 1.0 if b.maximize else 0.0
+        t = float(b.r_target)
         mean_sq = sum((R[i] - t) ** 2 for i in idx) / len(idx)
         mse += (w / w_sum) * mean_sq
     return math.sqrt(mse)
@@ -512,7 +534,7 @@ def build_maxmin_r_residuals(
             w = max(float(b.weight), 0.0)
             if not idx or w <= 0.0:
                 continue
-            t = 1.0 if b.maximize else 0.0
+            t = float(b.r_target)
             n = len(idx)
             # 0.5 Σ_i r_i² = (w/W) · mean (R−t)²
             scale = math.sqrt(2.0 * w / (w_sum * n))
@@ -782,9 +804,10 @@ def print_band_report(
         ]
         if not rs:
             continue
-        goal = "maximize R" if b.maximize else "minimize R"
+        goal = "high-R" if b.maximize else "low-R"
         print(
-            f"  {b.wl_lo / _NM:.0f}–{b.wl_hi / _NM:.0f} nm  ({goal}, w={b.weight:g}): "
+            f"  {b.wl_lo / _NM:.0f}–{b.wl_hi / _NM:.0f} nm  ({goal}, "
+            f"R_target={b.r_target:g}, w={b.weight:g}): "
             f"R mean/min/max = {100 * sum(rs)/len(rs):.1f}/"
             f"{100 * min(rs):.1f}/{100 * max(rs):.1f}%"
         )
@@ -959,10 +982,9 @@ def run(stack_path: str, cfg_path: str) -> int:
     )
     print(f"  n_bands: {len(rbands)}")
     for b in rbands:
-        goal = "maximize→1" if b.maximize else "minimize→0"
         print(
             f"    {b.wl_lo / _NM:.0f}–{b.wl_hi / _NM:.0f} nm  "
-            f"R {goal}  weight={b.weight:g}"
+            f"R_target={b.r_target:g}  weight={b.weight:g}"
         )
 
     plot_lo, plot_hi = cfg.get("plot_wavelength_nm", [400, 1800])
@@ -1154,7 +1176,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             f"n_iter={result.n_iter}  msg={result.message}",
             nk_note,
             "# incident and substrate thicknesses fixed (not optimised)",
-            "# R_target: minimize bands → 0, maximize bands → 1",
+            "# R_target: per-band reflectance target in [0, 1]",
         ],
     )
     write_stack_txt(
@@ -1297,7 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
         "config",
         nargs="?",
         default=os.path.join(here, "examples", "example_optimize_film.json"),
-        help="JSON with n_bands, bands[].objective, method=adam|lm|de|dual_annealing",
+        help="JSON with bands[].R_target / objective, method=adam|lm|de|dual_annealing",
     )
     args = ap.parse_args(argv)
     return run(args.stack, args.config)

@@ -3,9 +3,24 @@
   "n_bands": 3,
   "method": "adam",
   "bands": [
-    {"wavelength_nm": [420, 700], "objective": "minimize", "weight": 2.0},
-    {"wavelength_nm": [800, 1200], "objective": "maximize", "weight": 1.5},
-    {"wavelength_nm": [1400, 1800], "objective": "maximize", "weight": 1.0}
+    {
+      "wavelength_nm": [420, 700],
+      "objective": "minimize",
+      "R_target": 0.05,
+      "weight": 2.0
+    },
+    {
+      "wavelength_nm": [800, 1200],
+      "objective": "maximize",
+      "R_target": 0.95,
+      "weight": 1.5
+    },
+    {
+      "wavelength_nm": [1400, 1800],
+      "objective": "maximize",
+      "R_target": 0.90,
+      "weight": 1.0
+    }
   ],
   "wavelength_step_nm": 20,
   "max_iter": 5,
