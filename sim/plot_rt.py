@@ -19,7 +19,7 @@ import json
 import math
 import os
 import sys
-from typing import Any
+from typing import Any, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -49,9 +49,14 @@ COLOR_A = "#6a8f6a"  # sage green
 # Layer bar fills: light enough for dark labels.
 _LAYER_FACE_COLORS = {
     "tio2": "#8fb4d4",
+    "tio2_pvd": "#8fb4d4",
+    "tio2_eb": "#7aa8c8",
+    "tio2_amorphous": "#9bbfd8",
     "tio2_a": "#8fb4d4",
     "tio2_rutile": "#6f9fc4",
     "sio2": "#e6b980",
+    "sio2_fused": "#e6b980",
+    "sio2_pvd": "#d4a56e",
     "ito": "#8fbf88",
     "ag": "#c9a0c0",
     "glass": "#c4b09a",
@@ -254,6 +259,164 @@ def layer_face_color(material: str, index: int = 0) -> str:
     return _LAYER_FALLBACK[index % len(_LAYER_FALLBACK)]
 
 
+def materials_used_in_stack(
+    incident: str,
+    layers: Sequence[tuple[str, float]] | None,
+    substrate: str,
+) -> list[str]:
+    """Unique materials in stack order (incident → coating → substrate)."""
+    names: list[str] = []
+    for name in (incident, *[m for m, _ in (layers or ())], substrate):
+        key = dsp.normalize_material_name(name)
+        if key not in names:
+            names.append(key)
+    return names
+
+
+def _lookup_fixed_nk(fixed_nk: dict[str, complex], name: str) -> complex:
+    key = dsp.normalize_material_name(name)
+    low = str(name).strip().lower()
+    for cand in (key, low, name):
+        if cand in fixed_nk:
+            return complex(fixed_nk[cand])
+        cl = str(cand).lower()
+        if cl in fixed_nk:
+            return complex(fixed_nk[cl])
+    raise KeyError(
+        f"material {name!r} missing from fixed n,k table; "
+        f"have: {sorted(fixed_nk)}"
+    )
+
+
+def sample_nk_curves(
+    materials: Sequence[str],
+    wavelengths_m: Sequence[float],
+    *,
+    fixed_nk: dict[str, complex] | None = None,
+) -> dict[str, list[complex]]:
+    """n(λ)+ik(λ) actually used: library dispersion or constant fixed_nk."""
+    out: dict[str, list[complex]] = {}
+    for name in materials:
+        key = dsp.normalize_material_name(name)
+        if fixed_nk is not None:
+            N = _lookup_fixed_nk(fixed_nk, name)
+            out[key] = [N] * len(wavelengths_m)
+        else:
+            out[key] = [dsp.material_n(key, wl) for wl in wavelengths_m]
+    return out
+
+
+def write_nk_csv(
+    path: str,
+    wavelengths_m: Sequence[float],
+    nk_by_material: dict[str, list[complex]],
+) -> None:
+    """Write wavelength + per-material n,k columns."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    mats = list(nk_by_material.keys())
+    with open(path, "w", encoding="utf-8") as fh:
+        header = ["wavelength_nm"]
+        for m in mats:
+            header += [f"{m}_n", f"{m}_k"]
+        fh.write(",".join(header) + "\n")
+        for i, wl in enumerate(wavelengths_m):
+            row = [f"{wl / _NM:.2f}"]
+            for m in mats:
+                N = nk_by_material[m][i]
+                row += [f"{N.real:.6f}", f"{N.imag:.6f}"]
+            fh.write(",".join(row) + "\n")
+
+
+def plot_used_nk(
+    path: str,
+    wavelengths_m: Sequence[float],
+    nk_by_material: dict[str, list[complex]],
+    *,
+    source_label: str = "library",
+    title: str | None = None,
+) -> None:
+    """Plot n(λ) and k(λ) for materials actually used in the TMM stack."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise SystemExit(
+            "matplotlib is required for plotting; pip install matplotlib"
+        ) from exc
+
+    if not nk_by_material:
+        return
+
+    apply_plot_style()
+    wl_nm = [w / _NM for w in wavelengths_m]
+    mats = list(nk_by_material.keys())
+
+    fig, axes = plt.subplots(2, 1, figsize=(10.5, 8.2), sharex=True)
+    for i, name in enumerate(mats):
+        color = layer_face_color(name, i)
+        curve = nk_by_material[name]
+        axes[0].plot(
+            wl_nm,
+            [z.real for z in curve],
+            color=color,
+            lw=LINEWIDTH,
+            label=name,
+        )
+        axes[1].plot(
+            wl_nm,
+            [z.imag for z in curve],
+            color=color,
+            lw=LINEWIDTH,
+            label=name,
+        )
+
+    hdr = title or f"Optical constants used in TMM  (nk_source={source_label})"
+    style_axes(axes[0], title=hdr, ylabel="n")
+    style_axes(axes[1], xlabel="Wavelength (nm)", ylabel="k")
+    axes[0].legend(
+        loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8"
+    )
+    axes[1].legend(
+        loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8"
+    )
+
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fig.savefig(path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_nk_panel(
+    ax,
+    wavelengths_m: Sequence[float],
+    nk_by_material: dict[str, list[complex]],
+    *,
+    quantity: str = "n",
+    source_label: str = "library",
+) -> None:
+    """Draw n or k vs wavelength for used materials on an existing axes."""
+    wl_nm = [w / _NM for w in wavelengths_m]
+    is_k = quantity.lower() == "k"
+    for i, (name, curve) in enumerate(nk_by_material.items()):
+        ys = [z.imag if is_k else z.real for z in curve]
+        ax.plot(
+            wl_nm,
+            ys,
+            color=layer_face_color(name, i),
+            lw=LINEWIDTH,
+            label=name,
+        )
+    style_axes(
+        ax,
+        title=f"{'Extinction k' if is_k else 'Refractive index n'} "
+        f"(used; nk_source={source_label})",
+        xlabel="Wavelength (nm)",
+        ylabel="k" if is_k else "n",
+    )
+    ax.legend(
+        loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8"
+    )
+
+
 def format_layers_caption(
     layers: list[tuple[str, float]],
     *,
@@ -453,6 +616,8 @@ def plot_results(
     materials_to_show: list[str] | None = None,
     layers_before: list[tuple[str, float]] | None = None,
     layers_after: list[tuple[str, float]] | None = None,
+    nk_by_material: dict[str, list[complex]] | None = None,
+    nk_source_label: str = "library",
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -466,22 +631,32 @@ def plot_results(
     wl_nm = [w / _NM for w in wavelengths_m]
     materials_to_show = materials_to_show or [
         "sio2",
+        "tio2",
         "tio2_a",
         "tio2_rutile",
         "glass",
         "air",
     ]
     has_stack = layers_before is not None or layers_after is not None
-
+    has_nk = bool(nk_by_material)
+    n_rows = 2 + (1 if has_stack else 0) + (2 if has_nk else (0 if has_stack else 1))
+    # Layout:
+    #   always: RT overlay, R
+    #   + stack panel if layers given
+    #   + n & k panels if nk_by_material given
+    #   else if no stack: legacy library-n panel from materials_to_show
+    fig_h = 4.0 * n_rows
     fig, axes = plt.subplots(
-        3,
+        n_rows,
         1,
-        figsize=(10.5, 12.8 if has_stack else 10.5),
+        figsize=(10.5, min(fig_h, 18.0)),
         sharex=False,
     )
+    if n_rows == 1:
+        axes = [axes]
+    else:
+        axes = list(axes)
     axes[1].sharex(axes[0])
-    if not has_stack:
-        axes[2].sharex(axes[0])
 
     ax = axes[0]
     ax.plot(
@@ -583,20 +758,43 @@ def plot_results(
         label="R after",
     )
     shade_bands(ax, bands)
-    if has_stack:
-        style_axes(ax, title="Reflectance", xlabel="Wavelength (nm)", ylabel="R (%)")
-    else:
+    if has_stack or has_nk:
         style_axes(ax, title="Reflectance", ylabel="R (%)")
+    else:
+        style_axes(ax, title="Reflectance", xlabel="Wavelength (nm)", ylabel="R (%)")
     ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
 
-    ax = axes[2]
+    row = 2
     if has_stack:
         plot_stack_panel(
-            ax,
+            axes[row],
             layers_before=layers_before,
             layers_after=layers_after,
         )
-    else:
+        row += 1
+
+    if has_nk:
+        assert nk_by_material is not None
+        axes[row].sharex(axes[0])
+        plot_nk_panel(
+            axes[row],
+            wavelengths_m,
+            nk_by_material,
+            quantity="n",
+            source_label=nk_source_label,
+        )
+        row += 1
+        axes[row].sharex(axes[0])
+        plot_nk_panel(
+            axes[row],
+            wavelengths_m,
+            nk_by_material,
+            quantity="k",
+            source_label=nk_source_label,
+        )
+    elif not has_stack:
+        ax = axes[row]
+        ax.sharex(axes[0])
         mat_colors = (COLOR_R, COLOR_T, COLOR_A, "#7a6a9a", "#8a7a5a")
         for i, name in enumerate(materials_to_show):
             if dsp.normalize_material_name(name) not in dsp.MATERIALS:

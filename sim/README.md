@@ -17,7 +17,8 @@ sim/.venv/bin/python sim/optimize_film.py \
 
 | 文件 | 内容 |
 |------|------|
-| `rt_before_after.png` | 优化前后反射率/透射率对比 |
+| `rt_before_after.png` | 优化前后反射率/透射率对比（含实际使用的 n,k） |
+| `nk_used.png` / `nk_used.csv` | 膜系实际使用的材料 n(λ),k(λ) |
 | `rt_best.png` / `rt_final.png` | 最优与最终迭代光谱 |
 | `spectrum_before_after.csv` | 同上光谱数值 |
 | `stack_best.txt` / `stack_final.txt` | 优化后膜系（文本格式，与 `plot_rt_txt.py` 兼容） |
@@ -32,7 +33,7 @@ sim/.venv/bin/python sim/optimize_film.py \
 3. **归一化损失**：波段内均值误差，与采样点数和绝对权重无关
 4. **可选正则**：`smooth_weight`（平滑）、`ripple_weight`（抑制纹波）、`error_power`（>2 时加重离群点）
 5. **优化方法**：`adam`（默认）、`lm`、`de`、`dual_annealing`；Adam 支持波长 mini-batch
-6. **绘图**：matplotlib 输出优化前后 R/T 与波段着色
+6. **绘图**：matplotlib 输出优化前后 R/T、波段着色，以及实际使用的 n,k
 
 ## 目录结构
 

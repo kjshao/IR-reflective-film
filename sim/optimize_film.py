@@ -49,7 +49,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tmm
 import dispersion as dsp
 from lm_optimizer import BandSpec, LMThicknessOptimizer
-from plot_rt import dense_grid_nm, plot_results, plot_rt, write_band_stats_csv, write_spectrum_csv
+from plot_rt import (
+    dense_grid_nm,
+    materials_used_in_stack,
+    plot_results,
+    plot_rt,
+    plot_used_nk,
+    sample_nk_curves,
+    write_band_stats_csv,
+    write_nk_csv,
+    write_spectrum_csv,
+)
 from plot_rt_txt import StackRow, load_stack_txt
 from rt_calculator import DEFAULT_SUBSTRATE_THICKNESS, RTCalculator, make_calculator
 
@@ -1042,6 +1052,17 @@ def run(stack_path: str, cfg_path: str) -> int:
     loss_path = os.path.join(out_dir, "loss_history.csv")
     # nk_note already set before optimize for live checkpoints.
 
+    # Optical constants actually used by TMM over the plot grid.
+    used_mats = materials_used_in_stack(
+        incident.material, layers_best, substrate.material
+    )
+    nk_curves = sample_nk_curves(
+        used_mats,
+        plot_wls,
+        fixed_nk=nk if nk_source == "fixed" else None,
+    )
+    nk_label = nk_source
+
     # CSV with before/after columns (after = best-loss stack).
     with open(csv_path, "w", encoding="utf-8") as fh:
         fh.write("wavelength_nm,R_before,T_before,R_after,T_after\n")
@@ -1061,7 +1082,16 @@ def run(stack_path: str, cfg_path: str) -> int:
         materials_to_show=[],
         layers_before=layers0,
         layers_after=layers_best,
+        nk_by_material=nk_curves,
+        nk_source_label=nk_label,
     )
+    plot_used_nk(
+        os.path.join(out_dir, "nk_used.png"),
+        plot_wls,
+        nk_curves,
+        source_label=nk_label,
+    )
+    write_nk_csv(os.path.join(out_dir, "nk_used.csv"), plot_wls, nk_curves)
     plot_rt(
         os.path.join(out_dir, "rt_best.png"),
         plot_wls,
@@ -1217,6 +1247,8 @@ def run(stack_path: str, cfg_path: str) -> int:
     print(f"  wrote {stack_final}")
     print(f"  wrote {loss_path}")
     print(f"  wrote {plot_path}")
+    print(f"  wrote {os.path.join(out_dir, 'nk_used.png')}")
+    print(f"  wrote {os.path.join(out_dir, 'nk_used.csv')}")
     print(f"  wrote {os.path.join(out_dir, 'rt_best.png')}")
     print(f"  wrote {os.path.join(out_dir, 'rt_final.png')}")
     print(f"  wrote {os.path.join(out_dir, 'band_stats_best.csv')}")
