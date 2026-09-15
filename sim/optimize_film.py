@@ -8,6 +8,11 @@ Optical constants: by default ``nk_source=library`` loads n(λ),k(λ) from the
 dispersion database by material name. Set ``nk_source=fixed`` (or
 ``use_fixed_nk: true``) to use the constant n,k columns from the stack file.
 
+Initial thicknesses: stack-file values by default. Set ``init.mode`` to
+``random_qw`` (quarter-wave + jitter over the band span) or
+``random_uniform``, or ``random_init: true``, to draw a reproducible random
+guess while keeping the material sequence.
+
 Objective: build a piecewise R target (minimize bands → 0, maximize → 1),
 then minimise the **band-normalized** fit
 
@@ -40,6 +45,7 @@ import argparse
 import json
 import math
 import os
+import random
 import sys
 from dataclasses import dataclass
 from typing import Sequence
@@ -48,7 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tmm
 import dispersion as dsp
-from lm_optimizer import BandSpec, LMThicknessOptimizer
+from lm_optimizer import BandSpec, LMThicknessOptimizer, _bounds_for
 from plot_rt import (
     dense_grid_nm,
     materials_used_in_stack,
@@ -65,6 +71,123 @@ from rt_calculator import DEFAULT_SUBSTRATE_THICKNESS, RTCalculator, make_calcul
 
 _NM = 1e-9
 _NK_REF_NM_DEFAULT = 550.0
+
+
+def _design_wavelengths_from_bands(
+    bands: Sequence[RObjectiveBand] | Sequence[BandSpec],
+    *,
+    n_centres: int = 6,
+) -> list[float]:
+    """Log-spaced centres spanning all band wavelengths (metres)."""
+    if not bands:
+        return [550e-9, 1000e-9, 1500e-9]
+    lo = min(float(b.wl_lo) for b in bands)
+    hi = max(float(b.wl_hi) for b in bands)
+    if hi <= lo:
+        return [lo]
+    n = max(1, int(n_centres))
+    if n == 1:
+        return [math.sqrt(lo * hi)]
+    log_lo, log_hi = math.log(lo), math.log(hi)
+    return [
+        math.exp(log_lo + (i + 0.5) * (log_hi - log_lo) / n) for i in range(n)
+    ]
+
+
+def random_qw_init(
+    layers: Sequence[tuple[str, float]],
+    bands: Sequence[RObjectiveBand] | Sequence[BandSpec],
+    *,
+    seed: int | None = None,
+    jitter: float = 0.35,
+    qw_fraction: float = 0.25,
+    min_thickness_m: float = 8e-9,
+) -> list[tuple[str, float]]:
+    """Physically reasonable random thicknesses; keep material sequence.
+
+    Each layer is initialised near a quarter-wave optical thickness at a
+    randomly chosen design wavelength from the band span, with relative
+    multiplicative jitter, then projected onto material bounds.
+    """
+    rng = random.Random(seed)
+    centres = _design_wavelengths_from_bands(bands)
+    j = max(0.0, float(jitter))
+    frac = max(0.05, float(qw_fraction))
+    out: list[tuple[str, float]] = []
+    for mat, _d0 in layers:
+        key = dsp.normalize_material_name(mat)
+        wl = centres[rng.randrange(len(centres))]
+        try:
+            n = float(dsp.material_n(key, wl).real)
+        except Exception:
+            n = 1.5
+        n = max(n, 1.01)
+        scale = math.exp(rng.uniform(-j, j)) if j > 0 else 1.0
+        d = frac * wl / n * scale
+        lo, hi = _bounds_for(key, min_thickness_m)
+        out.append((key, min(hi, max(lo, d))))
+    return out
+
+
+def apply_init_layers(
+    layers: Sequence[tuple[str, float]],
+    bands: Sequence[RObjectiveBand],
+    cfg: dict,
+) -> tuple[list[tuple[str, float]], str]:
+    """Apply JSON ``init`` / ``random_init`` settings; return (layers, note)."""
+    init_cfg = cfg.get("init")
+    if not isinstance(init_cfg, dict):
+        init_cfg = {}
+    mode = str(
+        init_cfg.get(
+            "mode",
+            "random_qw" if bool(cfg.get("random_init", False)) else "keep",
+        )
+    ).lower().strip()
+    if mode in ("keep", "file", "none", "off", "false", "0"):
+        return [tuple(x) for x in layers], "keep (stack file thicknesses)"
+
+    seed = init_cfg.get("seed", cfg.get("init_seed", cfg.get("global_seed")))
+    if seed is not None:
+        seed = int(seed)
+    jitter = float(init_cfg.get("jitter", cfg.get("init_jitter", 0.35)))
+    qw_fraction = float(init_cfg.get("qw_fraction", 0.25))
+    min_nm = float(cfg.get("min_thickness_nm", 8.0))
+
+    if mode in ("random_qw", "qw", "random", "true", "1"):
+        layers1 = random_qw_init(
+            layers,
+            bands,
+            seed=seed,
+            jitter=jitter,
+            qw_fraction=qw_fraction,
+            min_thickness_m=min_nm * _NM,
+        )
+        note = (
+            f"random_qw  seed={seed}  jitter={jitter:g}  "
+            f"qw_fraction={qw_fraction:g}"
+        )
+        return layers1, note
+
+    if mode in ("random_uniform", "uniform"):
+        rng = random.Random(seed)
+        out: list[tuple[str, float]] = []
+        for mat, _d0 in layers:
+            key = dsp.normalize_material_name(mat)
+            lo, hi = _bounds_for(key, min_nm * _NM)
+            # Prefer mid-thin range: log-uniform between lo and min(hi, 200 nm).
+            hi_eff = min(hi, 200e-9)
+            if hi_eff <= lo:
+                d = lo
+            else:
+                d = math.exp(rng.uniform(math.log(lo), math.log(hi_eff)))
+            out.append((key, d))
+        note = f"random_uniform  seed={seed}"
+        return out, note
+
+    raise ValueError(
+        f"unknown init.mode {mode!r}; use keep|random_qw|random_uniform"
+    )
 
 
 def parse_nk_source(cfg: dict) -> str:
@@ -787,10 +910,11 @@ def run(stack_path: str, cfg_path: str) -> int:
         nk = nk_table(incident, film_rows, substrate)
 
     # Only coating layers are free; incident + substrate stay fixed.
-    layers0 = [(r.material, r.thickness_m) for r in film_rows]
+    layers_file = [(r.material, r.thickness_m) for r in film_rows]
+    rbands = parse_r_bands(cfg)
+    layers0, init_note = apply_init_layers(layers_file, rbands, cfg)
     film_indices = [r.index for r in film_rows]
     free_indices = list(range(len(layers0)))
-    rbands = parse_r_bands(cfg)
 
     method = str(cfg.get("method", "adam")).lower()
     angle_deg = float(cfg.get("incident_angle_deg", 0.0))
@@ -929,6 +1053,11 @@ def run(stack_path: str, cfg_path: str) -> int:
         f"  free coating layers: {len(layers0)}  "
         f"(incident/substrate thicknesses not optimised)"
     )
+    print(f"  init: {init_note}")
+    if init_note.startswith("random"):
+        print("  init thicknesses (nm):")
+        for i, (m, d) in enumerate(layers0, 1):
+            print(f"    {i:2d}. {m:<10} {d / _NM:8.2f}")
     print(
         f"  objective: band-normalized mean(|R−target|^{error_power:g}) "
         f"+ smooth={smooth_weight:g} + ripple={ripple_weight:g} "

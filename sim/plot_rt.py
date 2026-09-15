@@ -46,32 +46,32 @@ COLOR_R = "#3d6f9c"  # soft slate blue
 COLOR_T = "#c17a3a"  # soft amber
 COLOR_A = "#6a8f6a"  # sage green
 
-# Layer bar fills: greige / clay / sage — no yellow or blue.
+# Layer bar fills: same soft blue / warm yellow as band shading backgrounds.
 _LAYER_FACE_COLORS = {
-    "tio2": "#b08978",
-    "tio2_pvd": "#b08978",
-    "tio2_eb": "#a67c6d",
-    "tio2_amorphous": "#c09a8c",
-    "tio2_a": "#b08978",
-    "tio2_rutile": "#9a7366",
-    "sio2": "#c9c2b8",
-    "sio2_fused": "#c9c2b8",
-    "sio2_pvd": "#bfb6ab",
-    "ito": "#8c9e8a",
-    "ag": "#a8909c",
-    "glass": "#b7aea4",
-    "pet": "#a39b88",
-    "air": "#e8e6e3",
+    "tio2": "#d9e8f5",
+    "tio2_pvd": "#d9e8f5",
+    "tio2_eb": "#cfe0f0",
+    "tio2_amorphous": "#e0eef8",
+    "tio2_a": "#d9e8f5",
+    "tio2_rutile": "#c5d8ea",
+    "sio2": "#f5e6d4",
+    "sio2_fused": "#f5e6d4",
+    "sio2_pvd": "#efdcc8",
+    "ito": "#ddebd8",
+    "ag": "#e8dff0",
+    "glass": "#e8e4dc",
+    "pet": "#f3ecd4",
+    "air": "#f7f7f5",
 }
 _LAYER_FALLBACK = (
-    "#b08978",
-    "#c9c2b8",
-    "#8c9e8a",
-    "#a8909c",
-    "#9a8b7a",
-    "#c4a494",
-    "#b7aea4",
-    "#8a9a92",
+    "#d9e8f5",
+    "#f5e6d4",
+    "#ddebd8",
+    "#e8dff0",
+    "#f3ecd4",
+    "#f0dde3",
+    "#d8ebe7",
+    "#e8e4dc",
 )
 
 # Typography — keep readable on saved PNGs (dpi=150).
