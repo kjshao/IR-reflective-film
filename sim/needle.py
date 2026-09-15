@@ -200,7 +200,7 @@ class NeedleSynthesizer:
         best = list(layers)
         best_cost = self.opt.cost(best)
         for s in (0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15):
-            trial = [(m, max(5e-9, d * s)) for m, d in layers]
+            trial = [(m, max(8e-9, d * s)) for m, d in layers]
             if stop_bands and not self._stop_ok(trial, stop_bands):
                 continue
             c = self.opt.cost(trial)
@@ -547,6 +547,6 @@ def make_optimizer_from_config(
         min_thickness=(
             float(cfg["min_thickness"])
             if cfg.get("min_thickness") is not None
-            else 1e-9 * float(cfg.get("min_thickness_nm", 5.0))
+            else 1e-9 * float(cfg.get("min_thickness_nm", 8.0))
         ),
     )

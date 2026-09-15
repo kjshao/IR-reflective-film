@@ -697,7 +697,7 @@ python3 sim/optimize_film.py \
 | `max_add_rounds` | 8–20 | Phase 1 增层轮数 |
 | `thickness_weight` | $0 \to 0.01$–$0.05$ | 达标后逐步增大以压薄 |
 | `fd_step_nm` | 0.5–2 | LM 有限差分步长 |
-| `min_thickness_nm` | 5（默认） | 单层最小厚度（nm）；抬高优化厚度下界 |
+| `min_thickness_nm` | 8（默认） | 单层最小厚度（nm）；抬高优化厚度下界 |
 | `nk_source` | `library`（默认） / `fixed` | `library`：按材料名从色散库读 n(λ),k(λ)；`fixed`：用文本膜系常数 n,k |
 | `error_power` | 2 或 4 | $>2$ 时加重离群点（纹波） |
 | `checkpoint_delta_weight` | 0 | $>0$ 时偏好厚度变化小的解 |

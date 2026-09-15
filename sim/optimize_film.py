@@ -856,7 +856,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         adam_beta2=float(cfg.get("adam_beta2", 0.999)),
         adam_eps=float(cfg.get("adam_eps", 1e-8)),
         adam_max_step=_NM * float(cfg.get("adam_max_step_nm", 10.0)),
-        min_thickness=_NM * float(cfg.get("min_thickness_nm", 5.0)),
+        min_thickness=_NM * float(cfg.get("min_thickness_nm", 8.0)),
         mini_batch=mini_batch and method == "adam",
         batch_size=batch_size,
         n_batches=n_batches,

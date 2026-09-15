@@ -88,7 +88,7 @@ sim/
   "smooth_weight": 0.5,
   "ripple_weight": 0.2,
   "adam_lr_nm": 2.0,
-  "min_thickness_nm": 5,
+  "min_thickness_nm": 8,
   "nk_source": "library",
   "incident_angle_deg": 0,
   "polarization": "unpolarized",
@@ -103,7 +103,7 @@ sim/
 
 - **`method`**：`adam` / `lm` / `de` / `dual_annealing`（后两者需 scipy）
 - **`nk_source`**：`library`（默认，按材料名从色散库读 n(λ),k(λ)）或 `fixed`（用文本膜系中的常数 n,k）；也可用 `use_fixed_nk: true`
-- **`min_thickness_nm`**：单层最小厚度（nm，默认 `5`）；优化时抬高各材料厚度下界
+- **`min_thickness_nm`**：单层最小厚度（nm，默认 `8`）；优化时抬高各材料厚度下界
 - **`mini_batch`**：`true` 或嵌套对象 `{"batch_size", "n_batches", "n_epochs", "shuffle_seed"}`，仅 `method=adam` 时生效
 - **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.txt`，并追加 `best_updates.csv`
 - **`use_cuda`**：`true` 时走 CuPy 批量 TMM（仅 NVIDIA CUDA；macOS 不可用）

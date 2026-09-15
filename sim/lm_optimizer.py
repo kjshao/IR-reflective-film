@@ -418,8 +418,8 @@ class LMThicknessOptimizer:
         # 0 = minimize cost; near-ties prefer smaller thickness Δ from start.
         checkpoint_delta_weight: float = 0.0,
         # Minimum free-layer thickness (metres). Unit in JSON configs: nm
-        # via ``min_thickness_nm`` (default 5 nm). Raises per-material floors.
-        min_thickness: float = 5e-9,
+        # via ``min_thickness_nm`` (default 8 nm). Raises per-material floors.
+        min_thickness: float = 8e-9,
     ):
         self.calc = calculator
         self.bands = list(bands)
