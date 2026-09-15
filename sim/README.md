@@ -30,10 +30,9 @@ sim/.venv/bin/python sim/optimize_film.py \
 
 1. **文本膜系输入**：`index material thickness_nm n k` 格式（见 `plot_rt_txt.py`）
 2. **多波段 R 目标**：每段设 `objective: maximize|minimize`（对应 R→1 / R→0）
-3. **归一化损失**：波段内均值误差，与采样点数和绝对权重无关
-4. **可选正则**：`smooth_weight`（平滑）、`ripple_weight`（抑制纹波）、`error_power`（>2 时加重离群点）
-5. **优化方法**：`adam`（默认）、`lm`、`de`、`dual_annealing`；Adam 支持波长 mini-batch
-6. **绘图**：matplotlib 输出优化前后 R/T、波段着色，以及实际使用的 n,k
+3. **损失**：波段归一化 RMSE + 可选 `thickness_weight`
+4. **优化方法**：`adam`（默认）、`lm`、`de`、`dual_annealing`；Adam 支持波长 mini-batch
+5. **绘图**：matplotlib 输出优化前后 R/T、波段着色，以及实际使用的 n,k
 
 ## 目录结构
 
@@ -84,9 +83,7 @@ sim/
   ],
   "wavelength_step_nm": 15,
   "max_iter": 40,
-  "error_power": 4.0,
-  "smooth_weight": 0.5,
-  "ripple_weight": 0.2,
+  "thickness_weight": 0.0,
   "adam_lr_nm": 2.0,
   "min_thickness_nm": 8,
   "nk_source": "library",

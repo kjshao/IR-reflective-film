@@ -14,13 +14,12 @@ Initial thicknesses: stack-file values by default. Set ``init.mode`` to
 guess while keeping the material sequence.
 
 Objective: build a piecewise R target (minimize bands → 0, maximize → 1),
-then minimise the **band-normalized** fit
+then minimise band-normalized RMSE plus an optional thickness penalty::
 
-    L = Σ_b w_b · mean_{λ∈b} |R − t_b|^p  /  Σ_b w_b
+    RMSE = sqrt( Σ_b w_b · mean_{λ∈b} (R − t_b)²  /  Σ_b w_b )
+    L    = RMSE + thickness_weight · (Σ d / d_ref)²
 
-(independent of sample count and absolute weight scale), plus optional
-peak-suppression terms (``smooth_weight``, ``ripple_weight``; raise
-``error_power`` above 2 to overweight sharp outliers).
+(independent of sample count and absolute weight scale).
 
 Usage::
 
@@ -446,80 +445,47 @@ def _active_band_weight_sum(
     )
 
 
-def reflectance_mse(
+def reflectance_rmse(
     R: Sequence[float],
     bands: Sequence[RObjectiveBand],
     wavelengths: Sequence[float],
-    *,
-    error_power: float = 2.0,
 ) -> float:
-    """Band-normalized fit loss, independent of N and absolute weight scale.
+    """Band-normalized RMSE, independent of N and absolute weight scale.
 
-    For each band ``b`` compute the in-band mean ``mean_b |R - t_b|^p``, then
+    For each band ``b`` compute the in-band mean squared error, then
 
-        L = Σ_b w_b · mean_b / Σ_b w_b
+        MSE  = Σ_b w_b · mean_b (R − t_b)² / Σ_b w_b
+        RMSE = sqrt(MSE)
 
     So widening a band (more sample points) or scaling all ``w_b`` by a
-    constant leaves ``L`` unchanged; only *relative* band weights matter.
+    constant leaves the value unchanged; only *relative* band weights matter.
     """
-    p = float(error_power)
-    if p <= 0:
-        raise ValueError(f"error_power must be > 0, got {error_power}")
     band_indices = _band_sample_indices(bands, wavelengths)
     w_sum = _active_band_weight_sum(bands, band_indices)
     if w_sum <= 0.0:
         return 0.0
-    loss = 0.0
+    mse = 0.0
     for b, idx in zip(bands, band_indices):
         w = max(float(b.weight), 0.0)
         if not idx or w <= 0.0:
             continue
         t = 1.0 if b.maximize else 0.0
-        mean_err = sum(abs(R[i] - t) ** p for i in idx) / len(idx)
-        loss += (w / w_sum) * mean_err
-    return loss
+        mean_sq = sum((R[i] - t) ** 2 for i in idx) / len(idx)
+        mse += (w / w_sum) * mean_sq
+    return math.sqrt(mse)
 
 
-def peak_suppression_penalty(
-    R: Sequence[float],
-    bands: Sequence[RObjectiveBand],
-    wavelengths: Sequence[float],
+def thickness_penalty(
+    layers: Sequence[tuple[str, float]],
     *,
-    smooth_weight: float,
-    ripple_weight: float,
+    thickness_weight: float,
+    thickness_ref: float = 1000e-9,
 ) -> float:
-    """Band-normalized smoothness + ripple; same weight/N independence as fit."""
-    band_indices = _band_sample_indices(bands, wavelengths)
-    w_sum = _active_band_weight_sum(bands, band_indices)
-    if w_sum <= 0.0:
+    """``thickness_weight * (Σ d / d_ref)²``; 0 when weight ≤ 0 or no layers."""
+    if thickness_weight <= 0 or not layers:
         return 0.0
-
-    pen = 0.0
-    if smooth_weight > 0:
-        for b, idx in zip(bands, band_indices):
-            w = max(float(b.weight), 0.0)
-            if not idx or w <= 0.0:
-                continue
-            diffs = [
-                R[j] - R[i]
-                for i, j in zip(idx, idx[1:])
-                if j == i + 1
-            ]
-            if not diffs:
-                continue
-            mean_d2 = sum(d * d for d in diffs) / len(diffs)
-            pen += smooth_weight * (w / w_sum) * mean_d2
-
-    if ripple_weight > 0:
-        for b, idx in zip(bands, band_indices):
-            w = max(float(b.weight), 0.0)
-            if len(idx) < 2 or w <= 0.0:
-                continue
-            rs = [R[i] for i in idx]
-            amp = max(rs) - min(rs)
-            pen += ripple_weight * (w / w_sum) * (amp * amp)
-
-    return pen
+    total = sum(d for _, d in layers)
+    return float(thickness_weight) * (total / thickness_ref) ** 2
 
 
 def build_maxmin_r_residuals(
@@ -530,97 +496,47 @@ def build_maxmin_r_residuals(
     *,
     thickness_weight: float = 0.0,
     thickness_ref: float = 1000e-9,
-    error_power: float = 2.0,
-    smooth_weight: float = 0.0,
-    ripple_weight: float = 0.0,
 ) -> list[float]:
-    """Residuals for band-normalized fit + peak-suppression regularisers.
+    """Residuals for band-normalized L2 fit + thickness.
 
-    Fit term (independent of sample count and absolute weight scale)::
-
-        L_fit = Σ_b w_b · mean_{λ∈b} |R − t_b|^p  /  Σ_b w_b
-
-    with ``t_b = 1`` (maximize) or ``0`` (minimize). Residuals are scaled so
-    ``0.5 * sum(r**2) == L_fit + L_smooth + L_ripple (+ thickness)``.
-
-    Peak suppression::
-
-      - ``error_power`` > 2 (e.g. 4): overweight large |R−target| outliers
-      - ``smooth_weight``: band-normalized mean (ΔR)²
-      - ``ripple_weight``: band-normalized (R_max − R_min)²
+    Fit residuals are scaled so ``0.5 * sum(r**2)`` equals the band-normalized
+    MSE (= RMSE²). Thickness residual matches ``thickness_penalty``.
     """
-    p = float(error_power)
-    if p <= 0:
-        raise ValueError(f"error_power must be > 0, got {error_power}")
-
     band_indices = _band_sample_indices(bands, wavelengths)
     w_sum = _active_band_weight_sum(bands, band_indices)
     if w_sum <= 0.0:
-        return [0.0]
-
-    res: list[float] = []
-    for b, idx in zip(bands, band_indices):
-        w = max(float(b.weight), 0.0)
-        if not idx or w <= 0.0:
-            continue
-        t = 1.0 if b.maximize else 0.0
-        n = len(idx)
-        # 0.5 Σ_i r_i² = (w/W) · mean |e|^p
-        scale = math.sqrt(2.0 * w / (w_sum * n))
-        for i in idx:
-            e = R[i] - t
-            mag = abs(e) ** (p / 2.0)
-            res.append(scale * (mag if e >= 0.0 else -mag))
-
-    if smooth_weight > 0:
+        res = [0.0]
+    else:
+        res = []
         for b, idx in zip(bands, band_indices):
             w = max(float(b.weight), 0.0)
             if not idx or w <= 0.0:
                 continue
-            pairs = [
-                (i, j)
-                for i, j in zip(idx, idx[1:])
-                if j == i + 1
-            ]
-            if not pairs:
-                continue
-            scale = math.sqrt(2.0 * smooth_weight * w / (w_sum * len(pairs)))
-            for i, j in pairs:
-                res.append(scale * (R[j] - R[i]))
-
-    if ripple_weight > 0:
-        for b, idx in zip(bands, band_indices):
-            w = max(float(b.weight), 0.0)
-            if len(idx) < 2 or w <= 0.0:
-                continue
-            rs = [R[i] for i in idx]
-            amp = max(rs) - min(rs)
-            scale = math.sqrt(2.0 * ripple_weight * w / w_sum)
-            res.append(scale * amp)
+            t = 1.0 if b.maximize else 0.0
+            n = len(idx)
+            # 0.5 Σ_i r_i² = (w/W) · mean (R−t)²
+            scale = math.sqrt(2.0 * w / (w_sum * n))
+            for i in idx:
+                res.append(scale * (R[i] - t))
 
     if thickness_weight > 0 and layers:
         total = sum(d for _, d in layers)
         res.append(math.sqrt(2.0 * thickness_weight) * total / thickness_ref)
+    if not res:
+        res = [0.0]
     return res
 
 
 class MaxMinROptimizer(LMThicknessOptimizer):
-    """Adam/LM thickness optimiser minimizing target MSE (+ peak penalties)."""
+    """Adam/LM thickness optimiser minimizing RMSE + optional thickness."""
 
     def __init__(
         self,
         calculator: RTCalculator,
         rbands: Sequence[RObjectiveBand],
-        *,
-        error_power: float = 2.0,
-        smooth_weight: float = 0.0,
-        ripple_weight: float = 0.0,
         **kwargs,
     ):
         self.rbands = list(rbands)
-        self.error_power = float(error_power)
-        self.smooth_weight = float(smooth_weight)
-        self.ripple_weight = float(ripple_weight)
         super().__init__(
             calculator,
             [b.as_band_spec() for b in rbands],
@@ -638,31 +554,14 @@ class MaxMinROptimizer(LMThicknessOptimizer):
             self.wavelengths,
             R,
             thickness_weight=self.thickness_weight,
-            error_power=self.error_power,
-            smooth_weight=self.smooth_weight,
-            ripple_weight=self.ripple_weight,
         )
 
     def cost(self, layers: Sequence[tuple[str, float]]) -> float:
-        """Band-normalized fit + peak terms (matches ``0.5*||r||^2``)."""
+        """Band-normalized RMSE + thickness penalty."""
         R, _T = self._rt(layers)
-        loss = reflectance_mse(
-            R,
-            self.rbands,
-            self.wavelengths,
-            error_power=self.error_power,
-        )
-        loss += peak_suppression_penalty(
-            R,
-            self.rbands,
-            self.wavelengths,
-            smooth_weight=self.smooth_weight,
-            ripple_weight=self.ripple_weight,
-        )
-        if self.thickness_weight > 0 and layers:
-            total = sum(d for _, d in layers)
-            loss += self.thickness_weight * (total / 1000e-9) ** 2
-        return loss
+        return reflectance_rmse(
+            R, self.rbands, self.wavelengths
+        ) + thickness_penalty(layers, thickness_weight=self.thickness_weight)
 
 
 def nk_table(
@@ -767,7 +666,7 @@ def make_txt_best_checkpoint_saver(
         headers = [
             f"# live best  method={method}  update=#{state['n']}  "
             f"stage={info.get('stage', '')}  "
-            f"mse={float(cost):.12e}  Δ={delta:+.6e}  "
+            f"loss={float(cost):.12e}  Δ={delta:+.6e}  "
             f"d_rms={d_rms:.3f} nm  "
             f"iter={info.get('iter', 0)}  n_eval={info.get('n_eval', 0)}",
             "# rewritten whenever the running best improves (cost + Δ)",
@@ -816,7 +715,7 @@ def make_txt_best_checkpoint_saver(
                 T,
                 bands=bands,
                 title=(
-                    f"live best  mse={float(cost):.4e}  "
+                    f"live best  loss={float(cost):.4e}  "
                     f"Δ={delta:+.3e}  #{state['n']}"
                 ),
                 layers=list(layers),
@@ -845,7 +744,7 @@ def make_txt_best_checkpoint_saver(
 def write_loss_history(path: str, history: list[float], best_iter: int) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write("iter,mse,is_best\n")
+        fh.write("iter,loss,is_best\n")
         for i, loss in enumerate(history):
             flag = 1 if i == best_iter else 0
             fh.write(f"{i},{loss:.12e},{flag}\n")
@@ -857,7 +756,7 @@ def write_loss_history_epochs(
     """Same as write_loss_history but header uses epoch (mini-batch mode)."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write("epoch,mse,is_best\n")
+        fh.write("epoch,loss,is_best\n")
         for i, loss in enumerate(history):
             flag = 1 if i == best_epoch else 0
             fh.write(f"{i},{loss:.12e},{flag}\n")
@@ -936,9 +835,6 @@ def run(stack_path: str, cfg_path: str) -> int:
         calc = ConstantNkCalculator(nk, use_cuda=use_cuda)
     else:
         calc = make_calculator(use_cuda=use_cuda)
-    error_power = float(cfg.get("error_power", 2.0))
-    smooth_weight = float(cfg.get("smooth_weight", 0.0))
-    ripple_weight = float(cfg.get("ripple_weight", 0.0))
 
     # Mini-batch: keep full-grid Adam by default; enable via mini_batch=true
     # or a nested object {"batch_size", "n_batches", ...}.
@@ -970,9 +866,6 @@ def run(stack_path: str, cfg_path: str) -> int:
         substrate_model="semi_infinite",
         wavelength_step=_NM * float(cfg.get("wavelength_step_nm", 10)),
         thickness_weight=float(cfg.get("thickness_weight", 0.0)),
-        error_power=error_power,
-        smooth_weight=smooth_weight,
-        ripple_weight=ripple_weight,
         fd_step=_NM * float(cfg.get("fd_step_nm", 0.5)),
         lambda0=float(cfg.get("lambda0", 1e-2)),
         max_iter=int(cfg.get("max_iter", 40)),
@@ -1012,7 +905,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     checkpoint_on_best = bool(cfg.get("checkpoint_on_best", True))
     checkpoint_plot_rt = bool(cfg.get("checkpoint_plot_rt", True))
 
-    print("Text-stack R-target MSE thickness optimiser")
+    print("Text-stack R-target RMSE thickness optimiser")
     print(f"  stack: {stack_path}")
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
@@ -1061,9 +954,8 @@ def run(stack_path: str, cfg_path: str) -> int:
         for i, (m, d) in enumerate(layers0, 1):
             print(f"    {i:2d}. {m:<10} {d / _NM:8.2f}")
     print(
-        f"  objective: band-normalized mean(|R−target|^{error_power:g}) "
-        f"+ smooth={smooth_weight:g} + ripple={ripple_weight:g} "
-        f"(independent of N and absolute weights)"
+        f"  objective: band-normalized RMSE(R→target) "
+        f"+ thickness_weight={opt.thickness_weight:g}"
     )
     print(f"  n_bands: {len(rbands)}")
     for b in rbands:
@@ -1116,14 +1008,14 @@ def run(stack_path: str, cfg_path: str) -> int:
     result = opt.optimize(layers0, free_indices=free_indices, verbose=True)
     # Selected optimal: cost + thickness-Δ ranking.
     layers_best = result.layers
-    best_cost = result.cost
-    best_iter = result.best_iter
-    start_cost = result.start_cost if result.start_cost is not None else result.history[0]
-    best_delta = best_cost - start_cost
     layers_final = result.final_layers if result.final_layers is not None else layers_best
-    final_cost = (
-        result.final_cost if result.final_cost is not None else best_cost
-    )
+    # Always report the scalar L = RMSE + thickness (Adam already uses this;
+    # LM Gauss–Newton steps on MSE residuals, then we re-evaluate here).
+    best_cost = opt.cost(layers_best)
+    final_cost = opt.cost(layers_final)
+    best_iter = result.best_iter
+    start_cost = opt.cost(layers0)
+    best_delta = best_cost - start_cost
     final_delta = final_cost - start_cost
 
     R1, T1 = calc.spectrum(
@@ -1151,7 +1043,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             opt.wavelengths,
             opt._rt(g.layers)[0],
         )
-        print(f"  global MSE={g.cost:.6e}", flush=True)
+        print(f"  global loss={g.cost:.6e}", flush=True)
     print_band_report(
         f"Best (cost+Δ, {'epoch' if opt.mini_batch else 'iter'} {best_iter})",
         layers_best,
@@ -1160,7 +1052,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         opt._rt(layers_best)[0],
     )
     print(
-        f"\n  best MSE={best_cost:.6e}  Δ={best_delta:+.3e} at "
+        f"\n  best loss={best_cost:.6e}  Δ={best_delta:+.3e} at "
         f"{'epoch' if opt.mini_batch else 'iter'} {best_iter}  "
         f"(ran {result.n_iter} "
         f"{'epochs' if opt.mini_batch else 'iters'}, {result.message})"
@@ -1173,7 +1065,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             opt.wavelengths,
             opt._rt(layers_final)[0],
         )
-        print(f"  final MSE={final_cost:.6e}  Δ={final_delta:+.3e}", flush=True)
+        print(f"  final loss={final_cost:.6e}  Δ={final_delta:+.3e}", flush=True)
 
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, "spectrum_before_after.csv")
@@ -1232,7 +1124,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         title=(
             f"{os.path.basename(stack_path)} best "
             f"({method.upper()} iter {best_iter}, "
-            f"mse={best_cost:.4e}, Δ={best_delta:+.3e})"
+            f"loss={best_cost:.4e}, Δ={best_delta:+.3e})"
         ),
         layers=layers_best,
     )
@@ -1244,7 +1136,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         bands=plot_bands,
         title=(
             f"{os.path.basename(stack_path)} final "
-            f"({method.upper()}, mse={final_cost:.4e}, Δ={final_delta:+.3e})"
+            f"({method.upper()}, loss={final_cost:.4e}, Δ={final_delta:+.3e})"
         ),
         layers=layers_final,
     )
@@ -1257,7 +1149,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         film_indices=film_indices,
         header_lines=[
             f"# best stack (cost+Δ)  method={method}  "
-            f"mse={best_cost:.12e}  Δ={best_delta:+.6e}  "
+            f"loss={best_cost:.12e}  Δ={best_delta:+.6e}  "
             f"best_iter={best_iter}  "
             f"n_iter={result.n_iter}  msg={result.message}",
             nk_note,
@@ -1274,7 +1166,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         film_indices=film_indices,
         header_lines=[
             f"# final iterate  method={method}  "
-            f"mse={final_cost:.12e}  Δ={final_delta:+.6e}  "
+            f"loss={final_cost:.12e}  Δ={final_delta:+.6e}  "
             f"n_iter={result.n_iter}  msg={result.message}",
             nk_note,
             "# last iterate (may differ from stack_best.txt)",
@@ -1290,7 +1182,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         film_indices=film_indices,
         header_lines=[
             f"# best stack (same as stack_best.txt)  "
-            f"mse={best_cost:.12e}  best_iter={best_iter}",
+            f"loss={best_cost:.12e}  best_iter={best_iter}",
             nk_note,
             "# incident and substrate thicknesses fixed (not optimised)",
         ],
@@ -1314,7 +1206,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             film_indices=film_indices,
             header_lines=[
                 f"# global-stage stack  method={method}  "
-                f"mse={g.cost:.12e}  msg={g.message}",
+                f"loss={g.cost:.12e}  msg={g.message}",
                 nk_note,
                 "# before local polish (lm/adam)",
             ],
@@ -1328,7 +1220,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             film_indices=film_indices,
             header_lines=[
                 f"# polished stack  method={result.message}  "
-                f"mse={best_cost:.12e}  global_mse={g.cost:.12e}",
+                f"loss={best_cost:.12e}  global_loss={g.cost:.12e}",
                 nk_note,
                 "# after local polish",
             ],

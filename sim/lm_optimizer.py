@@ -1322,8 +1322,9 @@ class LMThicknessOptimizer:
             delta[j] = -step
 
         x = self._project(materials, [x[i] + delta[i] for i in range(len(x))])
-        r = self.residuals(list(zip(materials, x)))
-        cost = 0.5 * sum(v_i * v_i for v_i in r)
+        layers_now = list(zip(materials, x))
+        r = self.residuals(layers_now)
+        cost = self.cost(layers_now)
         step_norm = math.sqrt(sum(d * d for d in delta))
         return x, cost, r, step_norm
 
@@ -1338,8 +1339,9 @@ class LMThicknessOptimizer:
         materials = [m for m, _ in layers]
         x = self._project(materials, [d for _, d in layers])
         free = list(range(len(x))) if free_indices is None else list(free_indices)
-        r = self.residuals(list(zip(materials, x)))
-        cost = 0.5 * sum(v * v for v in r)
+        layers0 = list(zip(materials, x))
+        r = self.residuals(layers0)
+        cost = self.cost(layers0)
         history = [cost]
         start_cost = cost
         x0 = list(x)
@@ -1481,8 +1483,9 @@ class LMThicknessOptimizer:
         free = list(range(len(x))) if free_indices is None else list(free_indices)
 
         self._set_wavelengths(full_wls)
-        r = self.residuals(list(zip(materials, x)))
-        full_cost = 0.5 * sum(v * v for v in r)
+        layers0 = list(zip(materials, x))
+        r = self.residuals(layers0)
+        full_cost = self.cost(layers0)
         history = [full_cost]
         start_cost = full_cost
         x0 = list(x)
@@ -1538,7 +1541,7 @@ class LMThicknessOptimizer:
                 self._set_wavelengths(batch_wls)
                 batch_layers = list(zip(materials, x))
                 batch_r = self.residuals(batch_layers)
-                batch_cost = 0.5 * sum(v_i * v_i for v_i in batch_r)
+                batch_cost = self.cost(batch_layers)
                 t_step += 1
                 x, _bc, _br, step_norm = self._adam_step(
                     materials, x, free, m, v, lr=lr, t=t_step, cost=batch_cost
@@ -1559,8 +1562,9 @@ class LMThicknessOptimizer:
 
             # Full-grid evaluation for comparable history / best selection.
             self._set_wavelengths(full_wls)
-            r = self.residuals(list(zip(materials, x)))
-            full_cost = 0.5 * sum(v_i * v_i for v_i in r)
+            layers_now = list(zip(materials, x))
+            r = self.residuals(layers_now)
+            full_cost = self.cost(layers_now)
             history.append(full_cost)
 
             if self._accept_best(x, full_cost, best_x, best_cost):
