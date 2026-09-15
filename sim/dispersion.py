@@ -461,3 +461,105 @@ def material_n(name: str, wl: float) -> complex:
     if key not in MATERIALS:
         raise KeyError(f"unknown material '{name}'; known: {sorted(MATERIALS)}")
     return MATERIALS[key](wl)
+
+
+_DEFAULT_PRINT_NM = (300, 400, 450, 550, 700, 800, 1000, 1300, 1550, 1800)
+
+
+def library_material_names() -> list[str]:
+    """Registered names, aliases that share a model listed once after the primary."""
+    seen: dict[int, str] = {}
+    names: list[str] = []
+    for name, fn in MATERIALS.items():
+        key = id(fn)
+        if key not in seen:
+            seen[key] = name
+            names.append(name)
+    return names
+
+
+def print_library_nk(wavelengths_nm: tuple[int, ...] = _DEFAULT_PRINT_NM) -> None:
+    """Print n and k of every unique library material at the given wavelengths."""
+    names = library_material_names()
+    wls_m = [w * 1e-9 for w in wavelengths_nm]
+    print("Material library  N = n + i k")
+    print(
+        f"  {len(names)} materials, wavelengths (nm): "
+        + ", ".join(str(w) for w in wavelengths_nm)
+    )
+    hdr = f"  {'material':<16}" + "".join(f"  {w:>18}nm" for w in wavelengths_nm)
+    sub = f"  {'':16}" + "".join(f"  {'n':>8}  {'k':>8}" for _ in wavelengths_nm)
+    print(hdr)
+    print(sub)
+    for name in names:
+        row = f"  {name:<16}"
+        for wl in wls_m:
+            try:
+                z = MATERIALS[name](wl)
+                row += f"  {z.real:8.4f}  {z.imag:8.4f}"
+            except (ValueError, ZeroDivisionError, OverflowError):
+                row += f"  {'n/a':>8}  {'n/a':>8}"
+        print(row)
+    aliases = [n for n in sorted(MATERIALS) if n not in names]
+    if aliases:
+        print(f"\n  aliases: {', '.join(aliases)}")
+    print()
+
+
+def write_library_nk_csv(
+    path: str,
+    *,
+    wl_lo_nm: float = 300.0,
+    wl_hi_nm: float = 1800.0,
+    step_nm: float = 5.0,
+) -> None:
+    """Write n(λ), k(λ) for every unique library material."""
+    names = library_material_names()
+    n_pts = max(1, int(round((wl_hi_nm - wl_lo_nm) / step_nm)))
+    wls_nm = [wl_lo_nm + i * (wl_hi_nm - wl_lo_nm) / n_pts for i in range(n_pts + 1)]
+    parent = Path(path).parent
+    if str(parent) not in ("", "."):
+        parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        header = ["wavelength_nm"]
+        for name in names:
+            header += [f"{name}_n", f"{name}_k"]
+        fh.write(",".join(header) + "\n")
+        for w_nm in wls_nm:
+            wl = w_nm * 1e-9
+            row = [f"{w_nm:.2f}"]
+            for name in names:
+                try:
+                    z = MATERIALS[name](wl)
+                    row += [f"{z.real:.6f}", f"{z.imag:.6f}"]
+                except (ValueError, ZeroDivisionError, OverflowError):
+                    row += ["", ""]
+            fh.write(",".join(row) + "\n")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description="Print n and k from the thin-film material library."
+    )
+    ap.add_argument(
+        "--wl",
+        default=",".join(str(w) for w in _DEFAULT_PRINT_NM),
+        help="comma-separated wavelengths in nm (table print)",
+    )
+    ap.add_argument(
+        "--csv",
+        default="",
+        help="optional path to write a dense n,k CSV (default: no file)",
+    )
+    ap.add_argument("--lo", type=float, default=300.0, help="CSV start wavelength (nm)")
+    ap.add_argument("--hi", type=float, default=1800.0, help="CSV end wavelength (nm)")
+    ap.add_argument("--step", type=float, default=5.0, help="CSV step (nm)")
+    args = ap.parse_args()
+    wls = tuple(int(round(float(x))) for x in args.wl.split(",") if x.strip())
+    print_library_nk(wls or _DEFAULT_PRINT_NM)
+    if args.csv:
+        write_library_nk_csv(args.csv, wl_lo_nm=args.lo, wl_hi_nm=args.hi, step_nm=args.step)
+        print(f"  wrote {args.csv}")
+

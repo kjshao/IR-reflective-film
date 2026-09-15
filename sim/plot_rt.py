@@ -46,32 +46,32 @@ COLOR_R = "#3d6f9c"  # soft slate blue
 COLOR_T = "#c17a3a"  # soft amber
 COLOR_A = "#6a8f6a"  # sage green
 
-# Layer bar fills: light enough for dark labels.
+# Layer bar fills: greige / clay / sage — no yellow or blue.
 _LAYER_FACE_COLORS = {
-    "tio2": "#8fb4d4",
-    "tio2_pvd": "#8fb4d4",
-    "tio2_eb": "#7aa8c8",
-    "tio2_amorphous": "#9bbfd8",
-    "tio2_a": "#8fb4d4",
-    "tio2_rutile": "#6f9fc4",
-    "sio2": "#e6b980",
-    "sio2_fused": "#e6b980",
-    "sio2_pvd": "#d4a56e",
-    "ito": "#8fbf88",
-    "ag": "#c9a0c0",
-    "glass": "#c4b09a",
-    "pet": "#e6d28a",
-    "air": "#ececec",
+    "tio2": "#b08978",
+    "tio2_pvd": "#b08978",
+    "tio2_eb": "#a67c6d",
+    "tio2_amorphous": "#c09a8c",
+    "tio2_a": "#b08978",
+    "tio2_rutile": "#9a7366",
+    "sio2": "#c9c2b8",
+    "sio2_fused": "#c9c2b8",
+    "sio2_pvd": "#bfb6ab",
+    "ito": "#8c9e8a",
+    "ag": "#a8909c",
+    "glass": "#b7aea4",
+    "pet": "#a39b88",
+    "air": "#e8e6e3",
 }
 _LAYER_FALLBACK = (
-    "#8fb4d4",
-    "#e6b980",
-    "#8fbf88",
-    "#d98989",
-    "#7fb8b2",
-    "#c9a0c0",
-    "#e8a8b0",
-    "#c4b09a",
+    "#b08978",
+    "#c9c2b8",
+    "#8c9e8a",
+    "#a8909c",
+    "#9a8b7a",
+    "#c4a494",
+    "#b7aea4",
+    "#8a9a92",
 )
 
 # Typography — keep readable on saved PNGs (dpi=150).
@@ -153,6 +153,79 @@ def style_axes(ax, *, title: str | None = None, xlabel: str | None = None,
     for spine in ax.spines.values():
         spine.set_color("#6e6e6e")
         spine.set_linewidth(0.9)
+
+
+def style_percent_yaxis(ax) -> None:
+    """R/T axis: labels at 0/20/…/100; unlabeled dashed lines every 10%."""
+    ax.set_ylim(-2, 105)
+    ax.set_yticks([0, 20, 40, 60, 80, 100])
+    ax.set_yticks(list(range(10, 100, 10)), minor=True)
+    ax.tick_params(axis="y", which="minor", labelleft=False, length=0)
+    ax.yaxis.grid(False)
+    for y in range(0, 101, 10):
+        ax.axhline(
+            y,
+            color="#9a9a9a",
+            linestyle="--",
+            lw=0.75,
+            alpha=0.5,
+            zorder=0,
+        )
+
+
+def annotate_band_means(
+    ax,
+    wavelengths_m: Sequence[float],
+    R: Sequence[float],
+    T: Sequence[float] | None,
+    bands: list[BandSpec],
+    *,
+    R_before: Sequence[float] | None = None,
+    T_before: Sequence[float] | None = None,
+) -> None:
+    """Label each wavelength window with mean R (and T) in percent."""
+    if not bands:
+        return
+    after = band_stats(list(wavelengths_m), list(R), list(T or [0.0] * len(R)), bands)
+    before = (
+        band_stats(list(wavelengths_m), list(R_before), list(T_before or [0.0] * len(R)), bands)
+        if R_before is not None
+        else None
+    )
+    show_t = T is not None
+    for i, row in enumerate(after):
+        lo, hi = row["wl_nm"]
+        x = 0.5 * (lo + hi)
+        if before is not None and i < len(before):
+            lines = [
+                f"R̄ {100 * before[i]['R_mean']:.1f}→{100 * row['R_mean']:.1f}%"
+            ]
+            if show_t:
+                lines.append(
+                    f"T̄ {100 * before[i]['T_mean']:.1f}→{100 * row['T_mean']:.1f}%"
+                )
+        else:
+            lines = [f"R̄={100 * row['R_mean']:.1f}%"]
+            if show_t:
+                lines.append(f"T̄={100 * row['T_mean']:.1f}%")
+        ax.text(
+            x,
+            102,
+            "\n".join(lines),
+            ha="center",
+            va="top",
+            fontsize=10,
+            color="#2a2a2a",
+            linespacing=1.25,
+            bbox={
+                "boxstyle": "round,pad=0.22",
+                "facecolor": "white",
+                "edgecolor": "#c8c8c8",
+                "linewidth": 0.6,
+                "alpha": 0.88,
+            },
+            zorder=6,
+        )
 
 
 def contrast_text_color(hex_color: str) -> str:
@@ -539,35 +612,15 @@ def plot_stack_panel(
     for i, (label, lyrs) in enumerate(rows):
         y = float(len(rows) - 1 - i)
         totals.append(
-            draw_stack_thickness(ax, lyrs, label=label, y=y, height=0.7)
+            draw_stack_thickness(
+                ax, lyrs, label=label, y=y, height=0.7, show_values=False
+            )
         )
 
     xmax = max(totals) if totals else 1.0
     ax.set_xlim(0.0, xmax * 1.02 if xmax > 0 else 1.0)
-    # Leave room below for the wrapped layer list + legend.
-    text_lines = 0
-    for _, lyrs in rows:
-        text_lines += 1 + _layers_list_text(lyrs).count("\n")
-    bottom = -0.7 - 0.42 * text_lines - 0.35
-    ax.set_ylim(bottom, len(rows) - 0.3)
+    ax.set_ylim(-0.95, len(rows) - 0.22)
     ax.set_yticks([])
-
-    # Readable layer lists under the bars (not cramped inside segments).
-    y_text = -0.7
-    for label, lyrs in rows:
-        caption = f"{label}:  " + _layers_list_text(lyrs)
-        ax.text(
-            0.0,
-            y_text,
-            caption,
-            ha="left",
-            va="top",
-            fontsize=FONT_LABEL,
-            color="#2a2a2a",
-            family="sans-serif",
-            linespacing=1.35,
-        )
-        y_text -= 0.42 * (1 + caption.count("\n"))
 
     parts = []
     for label, lyrs in rows:
@@ -731,13 +784,22 @@ def plot_results(
                 linestyles=":",
                 lw=1.2,
             )
-    ax.set_ylim(-2, 105)
-    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
     style_axes(
         ax,
         title="Reflectance & transmittance before / after optimisation",
         ylabel="R, T (%)",
     )
+    style_percent_yaxis(ax)
+    annotate_band_means(
+        ax,
+        wavelengths_m,
+        R_after,
+        T_after,
+        bands,
+        R_before=R_before,
+        T_before=T_before,
+    )
+    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
 
     ax = axes[1]
     ax.plot(
@@ -762,6 +824,15 @@ def plot_results(
         style_axes(ax, title="Reflectance", ylabel="R (%)")
     else:
         style_axes(ax, title="Reflectance", xlabel="Wavelength (nm)", ylabel="R (%)")
+    style_percent_yaxis(ax)
+    annotate_band_means(
+        ax,
+        wavelengths_m,
+        R_after,
+        None,
+        bands,
+        R_before=R_before,
+    )
     ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
 
     row = 2
@@ -912,7 +983,7 @@ def plot_rt(
     wl_nm = [w / _NM for w in wavelengths_m]
     if layers:
         fig = plt.figure(figsize=(10.5, 11.4))
-        gs = fig.add_gridspec(3, 1, height_ratios=[1.1, 1.0, 1.25])
+        gs = fig.add_gridspec(3, 1, height_ratios=[1.15, 1.0, 0.62])
         ax0 = fig.add_subplot(gs[0])
         ax1 = fig.add_subplot(gs[1], sharex=ax0)
         ax2 = fig.add_subplot(gs[2])
@@ -949,17 +1020,19 @@ def plot_rt(
                     linestyles=":",
                     lw=1.2,
                 )
-    ax.set_ylim(-2, 105)
     ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
     style_axes(ax, title=title, ylabel="R, T, A (%)")
+    style_percent_yaxis(ax)
+    annotate_band_means(ax, wavelengths_m, R, T, bands)
 
     ax = axes[1]
     ax.plot(wl_nm, [100 * r for r in R], color=COLOR_R, lw=LINEWIDTH, label="R")
     ax.plot(wl_nm, [100 * t for t in T], color=COLOR_T, lw=LINEWIDTH, label="T")
     shade_bands(ax, bands)
-    ax.set_ylim(-2, 105)
     ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
     style_axes(ax, xlabel="Wavelength (nm)", ylabel="R, T (%)")
+    style_percent_yaxis(ax)
+    annotate_band_means(ax, wavelengths_m, R, T, bands)
 
     if layers:
         plot_stack_panel(axes[2], layers=layers)
