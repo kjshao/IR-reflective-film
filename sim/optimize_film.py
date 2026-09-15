@@ -38,6 +38,9 @@ Training modes (``method=adam``):
     start in ``[λ_min, λ_max)`` and takes ``batch_size`` points spaced by
     ``(λ_max−λ_min)/batch_size``, wrapping at ``λ_max`` back to ``λ_min``.
     One Adam step per batch; full-grid cost is recorded per epoch.
+
+Other local methods: ``method=lm`` (Gauss–Newton on residuals),
+``method=cg`` (Polak–Ribière nonlinear CG on the scalar loss).
 """
 
 from __future__ import annotations
@@ -898,6 +901,13 @@ def run(stack_path: str, cfg_path: str) -> int:
         adam_beta2=float(cfg.get("adam_beta2", 0.999)),
         adam_eps=float(cfg.get("adam_eps", 1e-8)),
         adam_max_step=_NM * float(cfg.get("adam_max_step_nm", 10.0)),
+        cg_initial_step=_NM
+        * float(cfg.get("cg_initial_step_nm", cfg.get("adam_lr_nm", 2.0))),
+        cg_max_step=_NM
+        * float(cfg.get("cg_max_step_nm", cfg.get("adam_max_step_nm", 10.0))),
+        cg_restart=(
+            int(cfg["cg_restart"]) if cfg.get("cg_restart") is not None else None
+        ),
         min_thickness=_NM * float(cfg.get("min_thickness_nm", 8.0)),
         mini_batch=mini_batch and method == "adam",
         batch_size=batch_size,
@@ -1319,7 +1329,7 @@ def main(argv: list[str] | None = None) -> int:
         "config",
         nargs="?",
         default=os.path.join(here, "examples", "example_optimize_film.json"),
-        help="JSON with bands[].R_target / objective, method=adam|lm|de|dual_annealing",
+        help="JSON with bands[].R_target / objective, method=adam|lm|cg|de|dual_annealing",
     )
     args = ap.parse_args(argv)
     return run(args.stack, args.config)

@@ -122,7 +122,7 @@ def resolve_global_polish_method(
     *,
     global_polish_lm: bool | None = None,
 ) -> str:
-    """Return ``none`` | ``lm`` | ``adam`` for post-global local polish."""
+    """Return ``none`` | ``lm`` | ``adam`` | ``cg`` for post-global local polish."""
     if method is not None and str(method).strip() != "":
         m = str(method).lower().strip()
         aliases = {
@@ -134,10 +134,14 @@ def resolve_global_polish_method(
             "levenberg": "lm",
             "levenberg-marquardt": "lm",
             "adam": "adam",
+            "cg": "cg",
+            "conjugate_gradient": "cg",
+            "conjugate-gradient": "cg",
+            "ncg": "cg",
         }
         if m not in aliases:
             raise ValueError(
-                f"unknown global_polish_method {method!r}; use none|lm|adam"
+                f"unknown global_polish_method {method!r}; use none|lm|adam|cg"
             )
         return aliases[m]
     if global_polish_lm:
@@ -368,7 +372,7 @@ def _require_scipy():
 
 
 class LMThicknessOptimizer:
-    """Thickness optimiser: LM, Adam, or scipy global (DE / dual annealing)."""
+    """Thickness optimiser: LM, Adam, CG, or scipy global (DE / dual annealing)."""
 
     def __init__(
         self,
@@ -394,6 +398,10 @@ class LMThicknessOptimizer:
         adam_beta2: float = 0.999,
         adam_eps: float = 1e-8,
         adam_max_step: float = 10e-9,
+        # Nonlinear CG (Polak–Ribière) on scalar cost; defaults track Adam.
+        cg_initial_step: float | None = None,
+        cg_max_step: float | None = None,
+        cg_restart: int | None = None,
         # Mini-batch Adam (wavelength subsets). Off by default → full-grid Adam.
         mini_batch: bool = False,
         batch_size: int = 8,
@@ -442,6 +450,13 @@ class LMThicknessOptimizer:
         self.adam_beta2 = adam_beta2
         self.adam_eps = adam_eps
         self.adam_max_step = adam_max_step
+        self.cg_initial_step = (
+            float(adam_lr) if cg_initial_step is None else float(cg_initial_step)
+        )
+        self.cg_max_step = (
+            float(adam_max_step) if cg_max_step is None else float(cg_max_step)
+        )
+        self.cg_restart = None if cg_restart is None else max(1, int(cg_restart))
         self.min_thickness = float(min_thickness)
         self.mini_batch = bool(mini_batch)
         self.batch_size = int(batch_size)
@@ -803,6 +818,15 @@ class LMThicknessOptimizer:
             return self._optimize_adam(
                 layers, free_indices=free_indices, verbose=verbose
             )
+        if self.method in (
+            "cg",
+            "conjugate_gradient",
+            "conjugate-gradient",
+            "ncg",
+        ):
+            return self._optimize_cg(
+                layers, free_indices=free_indices, verbose=verbose
+            )
         global_name = _GLOBAL_METHODS.get(self.method)
         if global_name == "de":
             return self._optimize_differential_evolution(
@@ -815,7 +839,7 @@ class LMThicknessOptimizer:
         if self.method not in ("lm", "levenberg", "levenberg-marquardt"):
             raise ValueError(
                 f"unknown optimizer method {self.method!r}; "
-                "use 'lm', 'adam', 'de', or 'dual_annealing'"
+                "use 'lm', 'adam', 'cg', 'de', or 'dual_annealing'"
             )
         return self._optimize_lm(layers, free_indices=free_indices, verbose=verbose)
 
@@ -976,6 +1000,10 @@ class LMThicknessOptimizer:
                 )
             finally:
                 self.mini_batch = saved_mb
+        elif polish == "cg":
+            polished = self._optimize_cg(
+                layers, free_indices=free_indices, verbose=verbose
+            )
         else:
             raise ValueError(f"internal: bad polish method {polish!r}")
 
@@ -1327,6 +1355,213 @@ class LMThicknessOptimizer:
         cost = self.cost(layers_now)
         step_norm = math.sqrt(sum(d * d for d in delta))
         return x, cost, r, step_norm
+
+    def _optimize_cg(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        """Projected Polak–Ribière nonlinear CG on ``self.cost()``."""
+        materials = [m for m, _ in layers]
+        x = self._project(materials, [d for _, d in layers])
+        free = list(range(len(x))) if free_indices is None else list(free_indices)
+        layers0 = list(zip(materials, x))
+        r = self.residuals(layers0)
+        cost = self.cost(layers0)
+        history = [cost]
+        start_cost = cost
+        x0 = list(x)
+        best_x, best_cost, best_r, best_iter = list(x), cost, r, 0
+        self._begin_run(x0, start_cost)
+
+        restart_every = self.cg_restart if self.cg_restart is not None else max(1, len(free))
+        alpha0 = max(self.cg_initial_step, 1e-15)
+        max_step = max(self.cg_max_step, 1e-15)
+        c1 = 1e-4
+
+        g, free_cols = self._cost_gradient(materials, x, cost, free)
+        if not free_cols:
+            return self._make_result(
+                best_layers=layers0,
+                best_cost=cost,
+                best_r=r,
+                n_iter=0,
+                success=False,
+                message="no_free",
+                history=history,
+                best_iter=0,
+                final_layers=layers0,
+                final_cost=cost,
+                start_cost=start_cost,
+            )
+
+        def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+            return sum(a[j] * b[j] for j in free_cols)
+
+        def _neg_grad() -> list[float]:
+            d = [0.0] * len(x)
+            for j in free_cols:
+                d[j] = -g[j]
+            return d
+
+        d = _neg_grad()
+        gTg = _dot(g, g)
+
+        if verbose:
+            print(
+                f"    CG start: cost={cost:.6e}  layers={len(materials)}  "
+                f"free={len(free)}  step0={alpha0*1e9:.2f} nm  "
+                f"restart={restart_every}",
+                flush=True,
+            )
+        self._notify_best(
+            list(zip(materials, x)),
+            cost,
+            stage="cg_start",
+            iter=0,
+            n_improve=0,
+        )
+        n_improve = 0
+        pending_best = False
+
+        for it in range(1, self.max_iter + 1):
+            # Scale trial step so the largest free-component move ~ alpha0.
+            d_abs = max((abs(d[j]) for j in free_cols), default=0.0)
+            if d_abs <= 0.0 or gTg <= 0.0:
+                break
+            alpha = min(alpha0 / d_abs, max_step / d_abs)
+            # Ensure descent after projection: require g·d < 0.
+            gTd = _dot(g, d)
+            if gTd >= 0.0:
+                d = _neg_grad()
+                gTd = _dot(g, d)
+                d_abs = max((abs(d[j]) for j in free_cols), default=0.0)
+                if d_abs <= 0.0 or gTd >= 0.0:
+                    break
+                alpha = min(alpha0 / d_abs, max_step / d_abs)
+
+            accepted = False
+            step_norm = 0.0
+            for _ in range(20):
+                x_trial = self._project(
+                    materials, [x[i] + alpha * d[i] for i in range(len(x))]
+                )
+                layers_trial = list(zip(materials, x_trial))
+                cost_trial = self.cost(layers_trial)
+                # Armijo on projected step (use directional derivative of unprojected).
+                if cost_trial <= cost + c1 * alpha * gTd:
+                    delta = [x_trial[i] - x[i] for i in range(len(x))]
+                    step_norm = math.sqrt(sum(v * v for v in delta))
+                    x = x_trial
+                    cost = cost_trial
+                    r = self.residuals(layers_trial)
+                    accepted = True
+                    break
+                alpha *= 0.5
+                if alpha * d_abs < 1e-15:
+                    break
+
+            history.append(cost)
+            if not accepted:
+                # Restart as steepest descent with tiny step.
+                d = _neg_grad()
+                alpha = min(0.25 * alpha0 / max(d_abs, 1e-30), max_step / max(d_abs, 1e-30))
+                x_trial = self._project(
+                    materials, [x[i] + alpha * d[i] for i in range(len(x))]
+                )
+                layers_trial = list(zip(materials, x_trial))
+                cost_trial = self.cost(layers_trial)
+                if cost_trial < cost:
+                    delta = [x_trial[i] - x[i] for i in range(len(x))]
+                    step_norm = math.sqrt(sum(v * v for v in delta))
+                    x, cost = x_trial, cost_trial
+                    r = self.residuals(layers_trial)
+                    history[-1] = cost
+                else:
+                    step_norm = 0.0
+
+            if self._accept_best(x, cost, best_x, best_cost):
+                best_x, best_cost, best_r, best_iter = list(x), cost, r, it
+                n_improve += 1
+                pending_best = True
+
+            g_new, _ = self._cost_gradient(materials, x, cost, free)
+            gTg_new = _dot(g_new, g_new)
+            # Polak–Ribière (with automatic restart if β < 0).
+            y_dot = sum((g_new[j] - g[j]) * g_new[j] for j in free_cols)
+            beta = 0.0 if gTg <= 1e-30 else y_dot / gTg
+            if beta < 0.0 or (it % restart_every) == 0:
+                beta = 0.0
+            d_new = [0.0] * len(x)
+            for j in free_cols:
+                d_new[j] = -g_new[j] + beta * d[j]
+            g, gTg, d = g_new, gTg_new, d_new
+
+            done = step_norm < 1e-12 or best_cost < self.tol or it == self.max_iter
+            if pending_best and self._local_checkpoint_due(it, final=done):
+                self._notify_best(
+                    list(zip(materials, best_x)),
+                    best_cost,
+                    stage="cg",
+                    iter=it,
+                    n_improve=n_improve,
+                )
+                pending_best = False
+
+            if verbose and (it == 1 or it % 5 == 0 or it == self.max_iter):
+                print(
+                    f"    CG iter {it:3d}: cost={cost:.6e}  "
+                    f"best={best_cost:.6e}@iter{best_iter}  "
+                    f"Δ={best_cost - start_cost:+.3e}  "
+                    f"β={beta:.3f}  Σd={sum(best_x)*1e9:.1f} nm",
+                    flush=True,
+                )
+            if step_norm < 1e-12 or best_cost < self.tol:
+                if pending_best:
+                    self._notify_best(
+                        list(zip(materials, best_x)),
+                        best_cost,
+                        stage="cg",
+                        iter=it,
+                        n_improve=n_improve,
+                    )
+                return self._make_result(
+                    best_layers=list(zip(materials, best_x)),
+                    best_cost=best_cost,
+                    best_r=best_r,
+                    n_iter=it,
+                    success=True,
+                    message="converged",
+                    history=history,
+                    best_iter=best_iter,
+                    final_layers=list(zip(materials, x)),
+                    final_cost=cost,
+                    start_cost=start_cost,
+                )
+
+        if pending_best:
+            self._notify_best(
+                list(zip(materials, best_x)),
+                best_cost,
+                stage="cg",
+                iter=self.max_iter,
+                n_improve=n_improve,
+            )
+        return self._make_result(
+            best_layers=list(zip(materials, best_x)),
+            best_cost=best_cost,
+            best_r=best_r,
+            n_iter=self.max_iter,
+            success=best_cost < history[0],
+            message="max_iter",
+            history=history,
+            best_iter=best_iter,
+            final_layers=list(zip(materials, x)),
+            final_cost=cost,
+            start_cost=start_cost,
+        )
 
     def _optimize_adam(
         self,
