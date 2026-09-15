@@ -4,6 +4,10 @@ Initial stack format matches ``plot_rt_txt.py``. Optimises **coating** layer
 thicknesses only; the first row (incident medium) and last row (substrate)
 are never free variables — their thicknesses stay exactly as in the input.
 
+Optical constants: by default ``nk_source=library`` loads n(λ),k(λ) from the
+dispersion database by material name. Set ``nk_source=fixed`` (or
+``use_fixed_nk: true``) to use the constant n,k columns from the stack file.
+
 Objective: build a piecewise R target (minimize bands → 0, maximize → 1),
 then minimise the **band-normalized** fit
 
@@ -43,12 +47,87 @@ from typing import Sequence
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tmm
+import dispersion as dsp
 from lm_optimizer import BandSpec, LMThicknessOptimizer
 from plot_rt import dense_grid_nm, plot_results, plot_rt, write_band_stats_csv, write_spectrum_csv
 from plot_rt_txt import StackRow, load_stack_txt
-from rt_calculator import DEFAULT_SUBSTRATE_THICKNESS, RTCalculator
+from rt_calculator import DEFAULT_SUBSTRATE_THICKNESS, RTCalculator, make_calculator
 
 _NM = 1e-9
+_NK_REF_NM_DEFAULT = 550.0
+
+
+def parse_nk_source(cfg: dict) -> str:
+    """Return ``'library'`` (dispersion DB) or ``'fixed'`` (stack-file n,k).
+
+    Default is ``library``. Explicit knobs:
+
+    - ``nk_source``: ``library`` | ``fixed`` (aliases: lib/dispersion/database,
+      stack/constant/input)
+    - ``use_fixed_nk``: true → fixed, false → library
+    - ``use_library_nk``: true → library, false → fixed
+    """
+    raw = cfg.get("nk_source")
+    if raw is not None:
+        s = str(raw).strip().lower()
+        aliases = {
+            "library": "library",
+            "lib": "library",
+            "dispersion": "library",
+            "database": "library",
+            "db": "library",
+            "fixed": "fixed",
+            "stack": "fixed",
+            "constant": "fixed",
+            "input": "fixed",
+            "file": "fixed",
+        }
+        if s not in aliases:
+            raise ValueError(
+                f"nk_source must be library|fixed (got {raw!r}); "
+                f"known: {sorted(set(aliases))}"
+            )
+        return aliases[s]
+    if "use_fixed_nk" in cfg:
+        return "fixed" if bool(cfg["use_fixed_nk"]) else "library"
+    if "use_library_nk" in cfg:
+        return "library" if bool(cfg["use_library_nk"]) else "fixed"
+    return "library"
+
+
+def library_nk_table(
+    materials: Sequence[str],
+    *,
+    ref_wavelength_m: float,
+) -> dict[str, complex]:
+    """Look up N at ``ref_wavelength_m`` for stack-file export / display."""
+    table: dict[str, complex] = {}
+    for name in materials:
+        key = dsp.normalize_material_name(name)
+        if key not in dsp.MATERIALS:
+            raise KeyError(
+                f"material {name!r} not in dispersion library; "
+                f"known: {sorted(dsp.MATERIALS)}"
+            )
+        table[key] = dsp.material_n(key, ref_wavelength_m)
+        # Also index by original lower-case token if different (hyphen forms).
+        low = str(name).strip().lower()
+        if low not in table:
+            table[low] = table[key]
+    return table
+
+
+def require_library_materials(*names: str) -> None:
+    missing = []
+    for name in names:
+        key = dsp.normalize_material_name(name)
+        if key not in dsp.MATERIALS:
+            missing.append(name)
+    if missing:
+        raise KeyError(
+            f"nk_source=library but material(s) missing from database: "
+            f"{missing}; known: {sorted(dsp.MATERIALS)}"
+        )
 
 
 @dataclass
@@ -478,26 +557,36 @@ def write_stack_txt(
     header_lines: list[str] | None = None,
 ) -> None:
     """Write stack text; incident/substrate thicknesses kept from input rows."""
+
+    def _N(name: str) -> complex:
+        key = dsp.normalize_material_name(name)
+        if key in nk:
+            return nk[key]
+        low = str(name).strip().lower()
+        if low in nk:
+            return nk[low]
+        raise KeyError(f"no n,k for material {name!r} in nk table")
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     lines: list[str] = []
     if header_lines:
         lines.extend(header_lines)
     lines.append("# index  material  thickness_nm  n  k")
+    Ni = _N(incident.material)
     lines.append(
         f"{incident.index}  {incident.material}  {incident.thickness_nm:.6g}  "
-        f"{nk[incident.material.lower()].real:.6g}  "
-        f"{nk[incident.material.lower()].imag:.6g}"
+        f"{Ni.real:.6g}  {Ni.imag:.6g}"
     )
     for i, (mat, d) in enumerate(films):
         idx = film_indices[i] if film_indices is not None else i + 1
-        N = nk[mat.lower()]
+        N = _N(mat)
         lines.append(
             f"{idx}  {mat}  {d / _NM:.4f}  {N.real:.6g}  {N.imag:.6g}"
         )
+    Ns = _N(substrate.material)
     lines.append(
         f"{substrate.index}  {substrate.material}  {substrate.thickness_nm:.6g}  "
-        f"{nk[substrate.material.lower()].real:.6g}  "
-        f"{nk[substrate.material.lower()].imag:.6g}"
+        f"{Ns.real:.6g}  {Ns.imag:.6g}"
     )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
@@ -518,6 +607,7 @@ def make_txt_best_checkpoint_saver(
     bands: list | None = None,
     theta0: float = 0.0,
     polarization: str = "unpolarized",
+    nk_note: str = "",
 ):
     """Live-update ``stack_best.txt`` (+ CSV log / RT plot) on best improve."""
     if not enabled:
@@ -539,6 +629,16 @@ def make_txt_best_checkpoint_saver(
         total_nm = sum(d for _, d in layers) / _NM
         delta = float(info.get("delta", 0.0) or 0.0)
         d_rms = float(info.get("thickness_delta_nm", 0.0) or 0.0)
+        headers = [
+            f"# live best  method={method}  update=#{state['n']}  "
+            f"stage={info.get('stage', '')}  "
+            f"mse={float(cost):.12e}  Δ={delta:+.6e}  "
+            f"d_rms={d_rms:.3f} nm  "
+            f"iter={info.get('iter', 0)}  n_eval={info.get('n_eval', 0)}",
+            "# rewritten whenever the running best improves (cost + Δ)",
+        ]
+        if nk_note:
+            headers.insert(1, nk_note)
         write_stack_txt(
             stack_live,
             incident,
@@ -546,14 +646,7 @@ def make_txt_best_checkpoint_saver(
             substrate,
             nk,
             film_indices=film_indices,
-            header_lines=[
-                f"# live best  method={method}  update=#{state['n']}  "
-                f"stage={info.get('stage', '')}  "
-                f"mse={float(cost):.12e}  Δ={delta:+.6e}  "
-                f"d_rms={d_rms:.3f} nm  "
-                f"iter={info.get('iter', 0)}  n_eval={info.get('n_eval', 0)}",
-                "# rewritten whenever the running best improves (cost + Δ)",
-            ],
+            header_lines=headers,
         )
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(
@@ -668,7 +761,21 @@ def run(stack_path: str, cfg_path: str) -> int:
         cfg = json.load(fh)
 
     incident, film_rows, substrate = load_stack_txt(stack_path)
-    nk = nk_table(incident, film_rows, substrate)
+    nk_source = parse_nk_source(cfg)
+    ref_nm = float(cfg.get("nk_ref_wavelength_nm", _NK_REF_NM_DEFAULT))
+    ref_wl = ref_nm * _NM
+
+    material_names = [
+        incident.material,
+        *[r.material for r in film_rows],
+        substrate.material,
+    ]
+    if nk_source == "library":
+        require_library_materials(*material_names)
+        nk = library_nk_table(material_names, ref_wavelength_m=ref_wl)
+    else:
+        nk = nk_table(incident, film_rows, substrate)
+
     # Only coating layers are free; incident + substrate stay fixed.
     layers0 = [(r.material, r.thickness_m) for r in film_rows]
     film_indices = [r.index for r in film_rows]
@@ -689,7 +796,10 @@ def run(stack_path: str, cfg_path: str) -> int:
         )
 
     use_cuda = bool(cfg.get("use_cuda", False))
-    calc = ConstantNkCalculator(nk, use_cuda=use_cuda)
+    if nk_source == "fixed":
+        calc = ConstantNkCalculator(nk, use_cuda=use_cuda)
+    else:
+        calc = make_calculator(use_cuda=use_cuda)
     error_power = float(cfg.get("error_power", 2.0))
     smooth_weight = float(cfg.get("smooth_weight", 0.0))
     ripple_weight = float(cfg.get("ripple_weight", 0.0))
@@ -736,6 +846,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         adam_beta2=float(cfg.get("adam_beta2", 0.999)),
         adam_eps=float(cfg.get("adam_eps", 1e-8)),
         adam_max_step=_NM * float(cfg.get("adam_max_step_nm", 10.0)),
+        min_thickness=_NM * float(cfg.get("min_thickness_nm", 5.0)),
         mini_batch=mini_batch and method == "adam",
         batch_size=batch_size,
         n_batches=n_batches,
@@ -769,6 +880,14 @@ def run(stack_path: str, cfg_path: str) -> int:
     print(f"  stack: {stack_path}")
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
+    print(f"  min_thickness_nm: {opt.min_thickness / _NM:g}")
+    if nk_source == "library":
+        print(
+            f"  nk_source: library  (dispersion DB; "
+            f"stack n,k columns ignored; ref export @ {ref_nm:g} nm)"
+        )
+    else:
+        print("  nk_source: fixed  (constant n,k from stack file)")
     if use_cuda:
         print("  use_cuda: True (CuPy wavelength-batched TMM)")
     print(f"  checkpoint_delta_weight: {opt.checkpoint_delta_weight:g}")
@@ -784,11 +903,17 @@ def run(stack_path: str, cfg_path: str) -> int:
         print(f"  training: full wavelength grid  max_iter={opt.max_iter}")
     print(
         f"  fixed incident: {incident.material}  "
-        f"d={incident.thickness_nm:g} nm  n={incident.n:g}  k={incident.k:g}"
+        f"d={incident.thickness_nm:g} nm  "
+        f"n={nk[dsp.normalize_material_name(incident.material)].real:g}  "
+        f"k={nk[dsp.normalize_material_name(incident.material)].imag:g}"
+        + (f"  (@{ref_nm:g} nm)" if nk_source == "library" else "")
     )
     print(
         f"  fixed substrate: {substrate.material}  "
-        f"d={substrate.thickness_nm:g} nm  n={substrate.n:g}  k={substrate.k:g}"
+        f"d={substrate.thickness_nm:g} nm  "
+        f"n={nk[dsp.normalize_material_name(substrate.material)].real:g}  "
+        f"k={nk[dsp.normalize_material_name(substrate.material)].imag:g}"
+        + (f"  (@{ref_nm:g} nm)" if nk_source == "library" else "")
     )
     print(
         f"  free coating layers: {len(layers0)}  "
@@ -812,6 +937,14 @@ def run(stack_path: str, cfg_path: str) -> int:
     plot_wls = [x * _NM for x in dense_grid_nm(float(plot_lo), float(plot_hi), plot_step)]
     plot_bands = [b.as_band_spec() for b in rbands]
 
+    if nk_source == "library":
+        nk_note = (
+            f"# nk_source=library  (n,k columns = dispersion DB @ {ref_nm:g} nm, "
+            "for reference; TMM uses full dispersion)"
+        )
+    else:
+        nk_note = "# nk_source=fixed  (constant n,k from input stack)"
+
     opt.on_best = make_txt_best_checkpoint_saver(
         out_dir,
         incident=incident,
@@ -826,6 +959,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         bands=plot_bands,
         theta0=theta0,
         polarization=pol,
+        nk_note=nk_note,
     )
 
     R0, T0 = calc.spectrum(
@@ -906,6 +1040,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     stack_best = os.path.join(out_dir, "stack_best.txt")
     stack_final = os.path.join(out_dir, "stack_final.txt")
     loss_path = os.path.join(out_dir, "loss_history.csv")
+    # nk_note already set before optimize for live checkpoints.
 
     # CSV with before/after columns (after = best-loss stack).
     with open(csv_path, "w", encoding="utf-8") as fh:
@@ -964,6 +1099,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             f"mse={best_cost:.12e}  Δ={best_delta:+.6e}  "
             f"best_iter={best_iter}  "
             f"n_iter={result.n_iter}  msg={result.message}",
+            nk_note,
             "# incident and substrate thicknesses fixed (not optimised)",
             "# R_target: minimize bands → 0, maximize bands → 1",
         ],
@@ -979,6 +1115,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             f"# final iterate  method={method}  "
             f"mse={final_cost:.12e}  Δ={final_delta:+.6e}  "
             f"n_iter={result.n_iter}  msg={result.message}",
+            nk_note,
             "# last iterate (may differ from stack_best.txt)",
         ],
     )
@@ -993,6 +1130,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         header_lines=[
             f"# best stack (same as stack_best.txt)  "
             f"mse={best_cost:.12e}  best_iter={best_iter}",
+            nk_note,
             "# incident and substrate thicknesses fixed (not optimised)",
         ],
     )
@@ -1016,6 +1154,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             header_lines=[
                 f"# global-stage stack  method={method}  "
                 f"mse={g.cost:.12e}  msg={g.message}",
+                nk_note,
                 "# before local polish (lm/adam)",
             ],
         )
@@ -1029,6 +1168,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             header_lines=[
                 f"# polished stack  method={result.message}  "
                 f"mse={best_cost:.12e}  global_mse={g.cost:.12e}",
+                nk_note,
                 "# after local polish",
             ],
         )

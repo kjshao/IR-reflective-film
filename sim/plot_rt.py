@@ -49,6 +49,8 @@ COLOR_A = "#6a8f6a"  # sage green
 # Layer bar fills: light enough for dark labels.
 _LAYER_FACE_COLORS = {
     "tio2": "#8fb4d4",
+    "tio2_a": "#8fb4d4",
+    "tio2_rutile": "#6f9fc4",
     "sio2": "#e6b980",
     "ito": "#8fbf88",
     "ag": "#c9a0c0",
@@ -189,7 +191,7 @@ def parse_bands(raw: list[dict]) -> list[BandSpec]:
 def parse_layers(raw: list[dict]) -> list[tuple[str, float]]:
     layers = []
     for layer in raw:
-        mat = str(layer["material"]).lower()
+        mat = dsp.normalize_material_name(layer["material"])
         if "thickness_nm" in layer:
             d = float(layer["thickness_nm"]) * _NM
         elif "thickness_m" in layer:
@@ -213,14 +215,16 @@ def build_chirped_seed(seed: dict) -> list[tuple[str, float]]:
         periods_list = [int(p) for p in raw_p]
     else:
         periods_list = [int(raw_p)] * len(centres)
-    cell = [str(m).lower() for m in seed.get("cell", ["tio2", "sio2"])]
+    cell = [
+        dsp.normalize_material_name(m) for m in seed.get("cell", ["tio2", "sio2"])
+    ]
     layers: list[tuple[str, float]] = []
     for lam0, periods in zip(centres, periods_list):
         for _ in range(periods):
             for mat in cell:
                 if mat not in dsp.MATERIALS:
                     raise KeyError(f"seed material '{mat}' not in library")
-                n = dsp.MATERIALS[mat](lam0).real
+                n = dsp.material_n(mat, lam0).real
                 layers.append((mat, 0.25 * lam0 / max(n, 1.01)))
     return layers
 
@@ -244,7 +248,7 @@ def dense_grid_nm(lo_nm: float, hi_nm: float, step_nm: float) -> list[float]:
 
 
 def layer_face_color(material: str, index: int = 0) -> str:
-    key = str(material).lower()
+    key = str(material).lower().replace("-", "_")
     if key in _LAYER_FACE_COLORS:
         return _LAYER_FACE_COLORS[key]
     return _LAYER_FALLBACK[index % len(_LAYER_FALLBACK)]
@@ -460,7 +464,13 @@ def plot_results(
     apply_plot_style()
 
     wl_nm = [w / _NM for w in wavelengths_m]
-    materials_to_show = materials_to_show or ["sio2", "tio2", "glass"]
+    materials_to_show = materials_to_show or [
+        "sio2",
+        "tio2_a",
+        "tio2_rutile",
+        "glass",
+        "air",
+    ]
     has_stack = layers_before is not None or layers_after is not None
 
     fig, axes = plt.subplots(
@@ -589,7 +599,7 @@ def plot_results(
     else:
         mat_colors = (COLOR_R, COLOR_T, COLOR_A, "#7a6a9a", "#8a7a5a")
         for i, name in enumerate(materials_to_show):
-            if name not in dsp.MATERIALS:
+            if dsp.normalize_material_name(name) not in dsp.MATERIALS:
                 continue
             nk = material_index(name, wavelengths_m)
             ax.plot(

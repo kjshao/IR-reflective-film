@@ -83,7 +83,7 @@ def chirped_dielectric(centres=DEFAULT_CENTRES, periods=8, cell=None):
     for lam0 in centres:
         for _ in range(periods):
             for mat, frac in cell:
-                n = dsp.MATERIALS[mat](lam0).real
+                n = dsp.material_n(mat, lam0).real
                 layers.append((mat, frac * lam0 / n))
     return layers
 
@@ -96,7 +96,7 @@ def chirped_dielectric(centres=DEFAULT_CENTRES, periods=8, cell=None):
 def spectrum(layers, substrate="glass", angles=(0.0,), wavelengths=None):
     """R(lambda), T(lambda) for each angle, unpolarised, with substrate back face."""
     wavelengths = wavelengths or FULL_GRID
-    sub_fn = dsp.MATERIALS[substrate]
+    sub_fn = lambda wl: dsp.material_n(substrate, wl)
     out = {}
     for deg in angles:
         theta = math.radians(deg)
@@ -104,7 +104,7 @@ def spectrum(layers, substrate="glass", angles=(0.0,), wavelengths=None):
         for wl in wavelengths:
             n_sub = sub_fn(wl)
             front = [(dsp.air(wl), 0.0)]
-            front += [(dsp.MATERIALS[m](wl), d) for m, d in layers]
+            front += [(dsp.material_n(m, wl), d) for m, d in layers]
             front.append((n_sub, 0.0))
             r, t = tmm.unpolarised(
                 tmm.with_incoherent_substrate,
@@ -124,7 +124,7 @@ def spectrum(layers, substrate="glass", angles=(0.0,), wavelengths=None):
 def _point(layers, wl, theta, sub_fn):
     n_sub = sub_fn(wl)
     front = [(dsp.air(wl), 0.0)]
-    front += [(dsp.MATERIALS[m](wl), d) for m, d in layers]
+    front += [(dsp.material_n(m, wl), d) for m, d in layers]
     front.append((n_sub, 0.0))
     return tmm.unpolarised(
         tmm.with_incoherent_substrate,
@@ -149,7 +149,7 @@ def cutoff_edge(wavelengths, transmittance, level=0.5):
 
 def metrics(layers, substrate="glass", deg=0.0):
     theta = math.radians(deg)
-    sub_fn = dsp.MATERIALS[substrate]
+    sub_fn = lambda wl: dsp.material_n(substrate, wl)
 
     def sweep(wls):
         rr, tt = [], []
@@ -191,6 +191,8 @@ BOUNDS = {
     "ag": (8e-9, 20e-9),
     "ito": (15e-9, 120e-9),
     "tio2": (20e-9, 300e-9),
+    "tio2_a": (20e-9, 300e-9),
+    "tio2_rutile": (20e-9, 300e-9),
     "sio2": (20e-9, 320e-9),
 }
 
@@ -271,13 +273,13 @@ def self_test():
 
 def print_dispersion():
     print("Dispersion models (n + ik)")
-    header = f"  {'material':>8} " + " ".join(f"{int(w * 1e9):>16}nm" for w in
+    header = f"  {'material':>12} " + " ".join(f"{int(w * 1e9):>16}nm" for w in
                                              (450e-9, 550e-9, 700e-9, 1000e-9, 1300e-9))
     print(header)
-    for name in ("ag", "ito", "tio2", "sio2", "glass"):
-        row = f"  {name:>8} "
+    for name in ("air", "sio2", "tio2_a", "tio2_rutile", "glass", "ag", "ito"):
+        row = f"  {name:>12} "
         for w in (450e-9, 550e-9, 700e-9, 1000e-9, 1300e-9):
-            n = dsp.MATERIALS[name](w)
+            n = dsp.material_n(name, w)
             row += f" {n.real:7.3f}+{n.imag:6.3f}i"
         print(row)
     print()
@@ -329,10 +331,10 @@ def write_spectrum(path, layers, substrate="glass"):
 def write_oghma_materials():
     """Emit oghma_local/materials-style n.csv and alpha.csv for each material."""
     root = os.path.join(OUT_DIR, "oghma_materials")
-    for name in ("ag", "ito", "tio2", "sio2", "glass", "pet"):
+    for name in ("ag", "ito", "tio2", "tio2_a", "tio2_rutile", "sio2", "glass", "pet", "air"):
         folder = os.path.join(root, name)
         os.makedirs(folder, exist_ok=True)
-        fn = dsp.MATERIALS[name]
+        fn = lambda wl, n=name: dsp.material_n(n, wl)
         with open(os.path.join(folder, "n.csv"), "w") as f_n, \
                 open(os.path.join(folder, "alpha.csv"), "w") as f_a:
             f_n.write("#oghma_data\n#x wavelength (m)\n#y n (au)\n")

@@ -13,8 +13,9 @@ Stack file format (whitespace-separated; ``#`` comments allowed)::
   - middle lines: coherent coating layers (thickness in nm)
   - last line: substrate / exit medium (thickness ignored; semi-infinite)
 
-``n`` is the refractive index and ``k`` is the extinction coefficient
-(N = n + i·k). Values are taken as wavelength-independent.
+``n`` / ``k`` are wavelength-independent when ``nk_source=fixed``.
+With ``nk_source=library`` (default for ``optimize_film.py``), those columns
+are ignored and optical constants come from ``dispersion.py`` by material name.
 """
 
 from __future__ import annotations
@@ -27,8 +28,10 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import dispersion as dsp
 import tmm
 from plot_rt import dense_grid_nm, plot_rt, write_spectrum_csv
+from rt_calculator import make_calculator
 
 _NM = 1e-9
 
@@ -92,8 +95,36 @@ def compute_spectrum(
     wavelengths_m: list[float],
     theta0: float = 0.0,
     polarization: str = "unpolarized",
+    *,
+    nk_source: str = "fixed",
 ) -> tuple[list[float], list[float]]:
-    """Semi-infinite substrate: coherent coating between incident and substrate."""
+    """Semi-infinite substrate: coherent coating between incident and substrate.
+
+    ``nk_source='fixed'`` uses stack-file n,k. ``'library'`` uses the dispersion
+    database by material name (wavelength-dependent).
+    """
+    src = str(nk_source).strip().lower()
+    if src in ("library", "lib", "dispersion", "database", "db"):
+        for row in (incident, *films, substrate):
+            key = dsp.normalize_material_name(row.material)
+            if key not in dsp.MATERIALS:
+                raise KeyError(
+                    f"material {row.material!r} not in dispersion library; "
+                    f"known: {sorted(dsp.MATERIALS)}"
+                )
+        calc = make_calculator()
+        return calc.spectrum(
+            [(f.material, f.thickness_m) for f in films],
+            wavelengths_m,
+            theta0,
+            incident=incident.material,
+            substrate=substrate.material,
+            polarization=polarization,
+            substrate_model="semi_infinite",
+        )
+    if src not in ("fixed", "stack", "constant", "input", "file"):
+        raise ValueError(f"nk_source must be library|fixed, got {nk_source!r}")
+
     coating = [(f.N, f.thickness_m) for f in films]
     rs, ts = [], []
     for wl in wavelengths_m:
@@ -118,6 +149,7 @@ def run(
     angle_deg: float = 0.0,
     polarization: str = "unpolarized",
     out_dir: str | None = None,
+    nk_source: str = "library",
 ) -> int:
     if wl_hi_nm <= wl_lo_nm:
         raise SystemExit(f"wavelength range invalid: {wl_lo_nm} .. {wl_hi_nm}")
@@ -128,7 +160,13 @@ def run(
     plot_wls = [x * _NM for x in dense_grid_nm(wl_lo_nm, wl_hi_nm, step_nm)]
     theta0 = math.radians(angle_deg)
     R, T = compute_spectrum(
-        incident, films, substrate, plot_wls, theta0, polarization
+        incident,
+        films,
+        substrate,
+        plot_wls,
+        theta0,
+        polarization,
+        nk_source=nk_source,
     )
 
     if out_dir is None:
@@ -141,18 +179,30 @@ def run(
         )
 
     total_nm = sum(f.thickness_nm for f in films)
+    src = str(nk_source).strip().lower()
+    use_lib = src in ("library", "lib", "dispersion", "database", "db")
     print("Film R/T spectrum (text stack)")
     print(f"  stack: {stack_path}")
+    print(f"  nk_source: {'library' if use_lib else 'fixed'}")
     print(f"  wavelength: {wl_lo_nm:g}–{wl_hi_nm:g} nm  step={step_nm:g} nm")
     print(f"  angle: {angle_deg:g} deg  pol: {polarization}")
-    print(f"  incident: {incident.material}  n={incident.n:g}  k={incident.k:g}")
+    if use_lib:
+        print(f"  incident: {incident.material}  (n,k from dispersion library)")
+    else:
+        print(f"  incident: {incident.material}  n={incident.n:g}  k={incident.k:g}")
     print(f"  {len(films)} film layers, total thickness {total_nm:.2f} nm")
     for f in films:
-        print(
-            f"    {f.index:2d}. {f.material:<10} "
-            f"{f.thickness_nm:8.2f} nm  n={f.n:g}  k={f.k:g}"
-        )
-    print(f"  substrate: {substrate.material}  n={substrate.n:g}  k={substrate.k:g}")
+        if use_lib:
+            print(f"    {f.index:2d}. {f.material:<10} {f.thickness_nm:8.2f} nm")
+        else:
+            print(
+                f"    {f.index:2d}. {f.material:<10} "
+                f"{f.thickness_nm:8.2f} nm  n={f.n:g}  k={f.k:g}"
+            )
+    if use_lib:
+        print(f"  substrate: {substrate.material}  (n,k from dispersion library)")
+    else:
+        print(f"  substrate: {substrate.material}  n={substrate.n:g}  k={substrate.k:g}")
 
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, "spectrum.csv")
@@ -212,6 +262,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="output directory (default: sim/out/plot_rt_txt)",
     )
+    ap.add_argument(
+        "--nk-source",
+        default="library",
+        choices=("library", "fixed"),
+        help="library=dispersion DB by material name (default); "
+        "fixed=use n,k columns from the stack file",
+    )
     args = ap.parse_args(argv)
     return run(
         args.stack,
@@ -221,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         angle_deg=args.angle,
         polarization=args.pol,
         out_dir=args.out_dir,
+        nk_source=args.nk_source,
     )
 
 

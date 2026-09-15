@@ -234,7 +234,7 @@ class NeedleSynthesizer:
         final_iter = self.opt.max_iter
 
         def n_of(mat: str, wl: float):
-            return dsp.MATERIALS[mat](wl)
+            return dsp.material_n(mat, wl)
 
         all_bands = list(self.opt.bands)
         stop_bands = [b for b in all_bands if b.R_min is not None]
@@ -544,4 +544,9 @@ def make_optimizer_from_config(
         da_accept=float(cfg.get("da_accept", -5.0)),
         checkpoint_local_every=cfg.get("checkpoint_local_every"),
         checkpoint_delta_weight=float(cfg.get("checkpoint_delta_weight", 0.0)),
+        min_thickness=(
+            float(cfg["min_thickness"])
+            if cfg.get("min_thickness") is not None
+            else 1e-9 * float(cfg.get("min_thickness_nm", 5.0))
+        ),
     )

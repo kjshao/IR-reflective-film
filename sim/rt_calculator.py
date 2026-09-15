@@ -42,9 +42,7 @@ class RTCalculator(ABC):
 
 
 def _n(name: str, wl: float) -> complex:
-    if name not in dsp.MATERIALS:
-        raise KeyError(f"unknown material '{name}'; known: {sorted(dsp.MATERIALS)}")
-    return dsp.MATERIALS[name](wl)
+    return dsp.material_n(name, wl)
 
 
 def _coherent_pair(

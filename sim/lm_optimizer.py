@@ -12,6 +12,8 @@ from rt_calculator import RTCalculator
 # Default physical bounds for dielectric layers (metres).
 DEFAULT_BOUNDS = {
     "tio2": (5e-9, 500e-9),
+    "tio2_a": (5e-9, 500e-9),
+    "tio2_rutile": (5e-9, 500e-9),
     "sio2": (5e-9, 550e-9),
     "ito": (15e-9, 150e-9),
     "ag": (6e-9, 25e-9),
@@ -137,8 +139,20 @@ def resolve_global_polish_method(
     return "none"
 
 
-def _bounds_for(mat: str) -> tuple[float, float]:
-    return DEFAULT_BOUNDS.get(mat.lower(), (10e-9, 500e-9))
+def _bounds_for(mat: str, min_thickness: float | None = None) -> tuple[float, float]:
+    """Return (lo, hi) thickness bounds in metres for ``mat``.
+
+    ``min_thickness`` (metres) raises the lower bound for every material:
+    ``lo = max(material_lo, min_thickness)``. If that would exceed ``hi``,
+    ``lo`` is clamped to ``hi``.
+    """
+    key = mat.lower().replace("-", "_")
+    lo, hi = DEFAULT_BOUNDS.get(key, (10e-9, 500e-9))
+    if min_thickness is not None:
+        lo = max(lo, float(min_thickness))
+        if lo > hi:
+            lo = hi
+    return lo, hi
 
 
 def wavelength_grid(bands: Sequence[BandSpec], step: float) -> list[float]:
@@ -397,6 +411,9 @@ class LMThicknessOptimizer:
         # Weight on RMS thickness change (nm/100) when ranking checkpoints.
         # 0 = minimize cost; near-ties prefer smaller thickness Δ from start.
         checkpoint_delta_weight: float = 0.0,
+        # Minimum free-layer thickness (metres). Unit in JSON configs: nm
+        # via ``min_thickness_nm`` (default 5 nm). Raises per-material floors.
+        min_thickness: float = 5e-9,
     ):
         self.calc = calculator
         self.bands = list(bands)
@@ -419,6 +436,7 @@ class LMThicknessOptimizer:
         self.adam_beta2 = adam_beta2
         self.adam_eps = adam_eps
         self.adam_max_step = adam_max_step
+        self.min_thickness = float(min_thickness)
         self.mini_batch = bool(mini_batch)
         self.batch_size = int(batch_size)
         # Default: about one full pass over the discrete study grid per epoch.
@@ -592,7 +610,7 @@ class LMThicknessOptimizer:
     def _project(self, materials: Sequence[str], x: list[float]) -> list[float]:
         out = []
         for mat, d in zip(materials, x):
-            lo, hi = _bounds_for(mat)
+            lo, hi = _bounds_for(mat, self.min_thickness)
             out.append(min(hi, max(lo, d)))
         return out
 
@@ -610,7 +628,7 @@ class LMThicknessOptimizer:
         J = [[0.0] * n for _ in range(m)]
         for j in free:
             step = self.fd_step
-            lo, hi = _bounds_for(materials[j])
+            lo, hi = _bounds_for(materials[j], self.min_thickness)
             xp = list(x)
             if x[j] + step <= hi:
                 xp[j] = x[j] + step
@@ -745,7 +763,7 @@ class LMThicknessOptimizer:
         g = [0.0] * n
         for j in free:
             step = self.fd_step
-            lo, hi = _bounds_for(materials[j])
+            lo, hi = _bounds_for(materials[j], self.min_thickness)
             xp = list(x)
             if x[j] + step <= hi:
                 xp[j] = x[j] + step
@@ -809,7 +827,7 @@ class LMThicknessOptimizer:
         free = list(range(len(x0_full))) if free_indices is None else list(free_indices)
         if not free:
             raise ValueError("global optimisation needs at least one free layer")
-        bounds = [_bounds_for(materials[j]) for j in free]
+        bounds = [_bounds_for(materials[j], self.min_thickness) for j in free]
         x0_free = [x0_full[j] for j in free]
         start_layers = list(zip(materials, x0_full))
         start_cost = self.cost(start_layers)
