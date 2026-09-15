@@ -6,17 +6,20 @@
     {
       "wavelength_nm": [420, 700],
       "objective": "minimize",
-      "weight": 2.0
+      "weight": 2.0,
+      "ripple_weight": 0.5
     },
     {
       "wavelength_nm": [800, 1200],
       "objective": "maximize",
-      "weight": 1.5
+      "weight": 1.5,
+      "ripple_weight": 0.3
     },
     {
       "wavelength_nm": [1400, 1800],
       "objective": "maximize",
-      "weight": 1.0
+      "weight": 1.0,
+      "ripple_weight": 0.2
     }
   ],
   "wavelength_step_nm": 15,
