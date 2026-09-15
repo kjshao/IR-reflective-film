@@ -83,9 +83,46 @@ FONT_LAYER = 13
 FONT_LAYER_SMALL = 12
 LINEWIDTH = 2.15
 
+_MPL_CONFIGURED = False
+
+
+def configure_matplotlib(*, backend: str = "Agg") -> None:
+    """Force a non-GUI backend before pyplot loads.
+
+    Saving PNGs never needs Qt/Tk. Interactive backends leave
+    ``QThreadStorage: entry N destroyed before end of thread`` noise on
+    process exit (CPU and GPU alike; CUDA teardown can make it more visible).
+    """
+    global _MPL_CONFIGURED
+    import os
+
+    # Prefer Agg unless the user explicitly set MPLBACKEND.
+    env_backend = os.environ.get("MPLBACKEND")
+    chosen = env_backend or backend
+    import matplotlib as mpl
+
+    current = ""
+    try:
+        current = str(mpl.get_backend())
+    except Exception:
+        current = ""
+    # Switch away from Qt/Tk/macOS GUI backends used by default on many installs.
+    gui_markers = ("qt", "tk", "macosx", "gtk", "wx", "webagg", "nbagg")
+    needs_switch = any(m in current.lower() for m in gui_markers) or not current
+    if needs_switch or not _MPL_CONFIGURED:
+        try:
+            mpl.use(chosen, force=True)
+        except Exception:
+            try:
+                mpl.use("Agg", force=True)
+            except Exception:
+                pass
+    _MPL_CONFIGURED = True
+
 
 def apply_plot_style() -> None:
     """Global matplotlib defaults for softer, readable figures."""
+    configure_matplotlib()
     import matplotlib as mpl
 
     mpl.rcParams.update(
@@ -109,6 +146,17 @@ def apply_plot_style() -> None:
             "axes.axisbelow": True,
         }
     )
+
+
+def close_all_figures() -> None:
+    """Drop figure state so Qt/Agg thread locals tear down cleanly."""
+    try:
+        configure_matplotlib()
+        import matplotlib.pyplot as plt
+
+        plt.close("all")
+    except Exception:
+        pass
 
 
 def band_bg_color(index: int) -> str:
@@ -410,6 +458,7 @@ def plot_used_nk(
 ) -> None:
     """Plot n(λ) and k(λ) for materials actually used in the TMM stack."""
     try:
+        apply_plot_style()
         import matplotlib.pyplot as plt
     except ImportError as exc:
         raise SystemExit(
@@ -419,7 +468,6 @@ def plot_used_nk(
     if not nk_by_material:
         return
 
-    apply_plot_style()
     wl_nm = [w / _NM for w in wavelengths_m]
     mats = list(nk_by_material.keys())
 
@@ -456,6 +504,7 @@ def plot_used_nk(
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
+    close_all_figures()
 
 
 def plot_nk_panel(
@@ -673,13 +722,12 @@ def plot_results(
     nk_source_label: str = "library",
 ) -> None:
     try:
+        apply_plot_style()
         import matplotlib.pyplot as plt
     except ImportError as exc:
         raise SystemExit(
             "matplotlib is required for plotting; pip install matplotlib"
         ) from exc
-
-    apply_plot_style()
 
     wl_nm = [w / _NM for w in wavelengths_m]
     materials_to_show = materials_to_show or [
@@ -890,6 +938,7 @@ def plot_results(
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
+    close_all_figures()
 
 
 def band_stats(
@@ -972,13 +1021,12 @@ def plot_rt(
     layers: list[tuple[str, float]] | None = None,
 ) -> None:
     try:
+        apply_plot_style()
         import matplotlib.pyplot as plt
     except ImportError as exc:
         raise SystemExit(
             "matplotlib is required for plotting; pip install matplotlib"
         ) from exc
-
-    apply_plot_style()
 
     wl_nm = [w / _NM for w in wavelengths_m]
     if layers:
@@ -1041,6 +1089,7 @@ def plot_rt(
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
+    close_all_figures()
 
 
 def resolve_layers(cfg: dict) -> list[tuple[str, float]]:
@@ -1126,10 +1175,12 @@ def run(cfg: dict, input_path: str, bands_cfg: dict | None = None) -> int:
     )
     print(f"\n  wrote {csv_path}")
     print(f"  wrote {plot_path}")
+    close_all_figures()
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_matplotlib()
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(
         description="Read a layer stack (+ optional bands) from JSON, "

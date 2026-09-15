@@ -56,6 +56,8 @@ import tmm
 import dispersion as dsp
 from lm_optimizer import BandSpec, LMThicknessOptimizer, _bounds_for
 from plot_rt import (
+    close_all_figures,
+    configure_matplotlib,
     dense_grid_nm,
     materials_used_in_stack,
     plot_results,
@@ -1382,10 +1384,12 @@ def run(stack_path: str, cfg_path: str) -> int:
     print(f"  wrote {os.path.join(out_dir, 'rt_final.png')}")
     print(f"  wrote {os.path.join(out_dir, 'band_stats_best.csv')}")
     print(f"  wrote {os.path.join(out_dir, 'band_stats_final.csv')}")
+    close_all_figures()
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_matplotlib()
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(
         description="Adam/LM thickness optimisation of a text-file stack "

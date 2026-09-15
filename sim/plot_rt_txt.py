@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dispersion as dsp
 import tmm
-from plot_rt import dense_grid_nm, plot_rt, write_spectrum_csv
+from plot_rt import close_all_figures, configure_matplotlib, dense_grid_nm, plot_rt, write_spectrum_csv
 from rt_calculator import make_calculator
 
 _NM = 1e-9
@@ -219,10 +219,12 @@ def run(
     )
     print(f"\n  wrote {csv_path}")
     print(f"  wrote {plot_path}")
+    close_all_figures()
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_matplotlib()
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(
         description="Read a plain-text film stack (n, k per layer), "
