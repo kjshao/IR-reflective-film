@@ -1,0 +1,12 @@
+# index  material  thickness_nm  n  k
+# first = incident medium; last = substrate; middle = coating layers
+0  air    0     1.00   0.0
+1  tio2   55    2.40   0.0
+2  sio2   85    1.46   0.0
+3  tio2   55    2.40   0.0
+4  sio2   85    1.46   0.0
+5  tio2   55    2.40   0.0
+6  sio2   85    1.46   0.0
+7  tio2   55    2.40   0.0
+8  sio2   85    1.46   0.0
+9  glass  0     1.52   0.0
