@@ -294,7 +294,7 @@ $$
 
 ### 4.5 多起点与自动回退
 
-- `method=multistart`：Latin-hypercube 生成多个厚度初值，每个初值运行 TRF（也可选 L-BFGS-B/LM/CG）。
+- `method=multistart`：Latin-hypercube 生成多个厚度初值，每个初值运行 TRF（也可选 L-BFGS-B/LM/CG/Adam）；选择 Adam 时可启用波长 mini-batch。
 - `method=auto`：先多起点局部优化；若指标仍未满足或相对改善不足，自动执行 DE，再用局部方法 polish。
 - TMM 计算较便宜时，多起点通常比直接全空间运行大种群更节省预算。
 

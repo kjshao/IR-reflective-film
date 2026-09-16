@@ -194,6 +194,29 @@ class TRFTests(unittest.TestCase):
                 multistart_gpu_ids=[0, 0],
             )
 
+    def test_multistart_supports_minibatch_adam(self):
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.4)],
+            method="multistart",
+            multistart_method="adam",
+            multistart_n=2,
+            multistart_seed=3,
+            wavelength_step=20e-9,
+            thickness_weight=0.0,
+            max_iter=2,
+            mini_batch=True,
+            batch_size=2,
+            n_batches=1,
+            n_epochs=2,
+            shuffle_seed=4,
+        )
+        full_wavelengths = list(optimizer.wavelengths)
+        result = optimizer.optimize([("x", 100e-9)], verbose=False)
+        self.assertIn("multistart(adam", result.message)
+        self.assertEqual(optimizer.wavelengths, full_wavelengths)
+        self.assertLess(result.cost, result.start_cost)
+
     def test_trf_finds_bounded_target_thickness(self):
         optimizer = LMThicknessOptimizer(
             LinearReflectanceCalculator(),

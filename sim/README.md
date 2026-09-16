@@ -115,7 +115,7 @@ sim/
 
 - **`method`**：`auto` / `multistart` / `trf` / `lm` / `adam` / `cg` / `lbfgs` / `de` / `dual_annealing`
 - **`auto`**：先运行 Latin-hypercube 多起点局部优化；若指标仍未满足或改善低于阈值，再运行 DE，并用局部方法 polish
-- **`multistart_n`** / **`multistart_method`** / **`multistart_seed`**：多起点数量、局部方法（默认 TRF）与随机种子
+- **`multistart_n`** / **`multistart_method`** / **`multistart_seed`**：多起点数量、局部方法（`trf` / `lbfgs` / `lm` / `cg` / `adam`，默认 TRF）与随机种子
 - **`multistart_gpu_ids`**：例如 `[0, 1, 2, 3]`；启用多个独立进程并将每个进程固定到一块 GPU，要求同时设置 `use_cuda: true`
 - **`multistart_progress_interval_s`**：多 GPU 任务尚未完成时的进度心跳间隔，默认 `10` 秒
 - **`auto_de_fallback`** / **`auto_min_relative_improvement`**：控制自动全局回退
@@ -128,7 +128,7 @@ sim/
 - **`max_total_thickness_nm`**：所有膜层总厚度的硬上限（nm）；超限候选会在保持单层边界的同时投影回可行域
 - **`thickness_bounds_nm`**：按材料设置优化全过程的硬边界 `[下限, 上限]`（nm）；未列出的材料沿用内置范围
 - **`multistart_sampling_bounds_nm`**：仅设置 Latin-hypercube 初值采样范围；必须位于对应的 `thickness_bounds_nm` 之内，未列出的材料沿用厚度硬边界
-- **`mini_batch`**：`true` 或嵌套对象 `{"batch_size", "n_batches", "n_epochs", "shuffle_seed"}`，仅 `method=adam` 时生效
+- **`mini_batch`**：`true` 或嵌套对象 `{"batch_size", "n_batches", "n_epochs", "shuffle_seed"}`；在 `method=adam` 或 `multistart_method=adam` 时生效
 - **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.txt`，并追加 `best_updates.csv`
 - **`use_cuda`**：`true` 时走 CuPy 批量 TMM（仅 NVIDIA CUDA；macOS 不可用）
 
@@ -147,6 +147,23 @@ sim/
 
 上述配置启动 4 个进程，每块 GPU 依次处理约 2 个起点；最终结果仍由
 主进程按统一 loss 选择。
+
+Multistart + mini-batch Adam：
+
+```json
+{
+  "method": "multistart",
+  "multistart_n": 8,
+  "multistart_method": "adam",
+  "adam_lr_nm": 2.0,
+  "mini_batch": {
+    "batch_size": 8,
+    "n_batches": 10,
+    "n_epochs": 40,
+    "shuffle_seed": 0
+  }
+}
+```
 
 ## 指定层数并自动生成膜系
 

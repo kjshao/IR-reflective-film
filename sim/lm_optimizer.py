@@ -1208,9 +1208,9 @@ class LMThicknessOptimizer:
                 layers, free_indices=free_indices, verbose=verbose
             )
         local = self.multistart_method
-        if local not in ("trf", "lbfgs", "lm", "cg"):
+        if local not in ("trf", "lbfgs", "lm", "cg", "adam"):
             raise ValueError(
-                f"multistart_method must be trf|lbfgs|lm|cg, got {local!r}"
+                f"multistart_method must be trf|lbfgs|lm|cg|adam, got {local!r}"
             )
 
         rng = random.Random(self.multistart_seed)

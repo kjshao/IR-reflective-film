@@ -860,6 +860,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     use_needle = bool(cfg.get("use_needle", False))
 
     method = str(cfg.get("method", "auto")).lower()
+    multistart_method = str(cfg.get("multistart_method", "trf")).lower()
     angle_deg = float(cfg.get("incident_angle_deg", 0.0))
     theta0 = math.radians(angle_deg)
     pol = str(cfg.get("polarization", "unpolarized"))
@@ -954,7 +955,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         lbfgs_maxls=int(cfg.get("lbfgs_maxls", 20)),
         trf_x_scale=cfg.get("trf_x_scale", "jac"),
         multistart_n=int(cfg.get("multistart_n", 8)),
-        multistart_method=str(cfg.get("multistart_method", "trf")),
+        multistart_method=multistart_method,
         multistart_seed=(
             int(cfg["multistart_seed"])
             if cfg.get("multistart_seed") is not None
@@ -980,7 +981,14 @@ def run(stack_path: str, cfg_path: str) -> int:
         thickness_bounds=parse_thickness_bounds_nm(
             cfg.get("thickness_bounds_nm")
         ),
-        mini_batch=mini_batch and method == "adam",
+        mini_batch=mini_batch
+        and (
+            method == "adam"
+            or (
+                method in ("auto", "hybrid", "multistart", "multi_start", "multi-start")
+                and multistart_method == "adam"
+            )
+        ),
         batch_size=batch_size,
         n_batches=n_batches,
         n_epochs=n_epochs,
