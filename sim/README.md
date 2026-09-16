@@ -114,8 +114,12 @@ sim/
 要点：
 
 - **`method`**：`auto` / `multistart` / `trf` / `lm` / `adam` / `cg` / `lbfgs` / `de` / `dual_annealing`
-- **`auto`**：先运行 Latin-hypercube 多起点局部优化；若指标仍未满足或改善低于阈值，再运行 DE，并用局部方法 polish
+- **`auto`**：先运行多起点局部优化；若指标仍未满足或改善低于阈值，再运行 DE，并用局部方法 polish
 - **`multistart_n`** / **`multistart_method`** / **`multistart_seed`**：多起点数量、局部方法（`trf` / `lbfgs` / `lm` / `cg` / `adam`，默认 TRF）与随机种子
+- **`multistart_sampler`**：`lhs`（默认）/ `sobol` / `extra_trees`；`extra_trees` 先进行 Sobol 候选预筛选，再用代理模型选择低预测 loss、高不确定度且彼此分散的起点
+- **`multistart_candidate_n`** / **`surrogate_pool_n`**：Extra Trees 的真实 loss 预筛选数量（默认 256）和代理候选池数量（默认 10000）
+- **`surrogate_trees`** / **`surrogate_exploration_beta`** / **`surrogate_diversity_weight`**：树数量、LCB 探索强度和起点距离多样性权重
+- **`multistart_final_polish_method`**：对多起点最优结果进行最终精修；推荐 `trf`
 - **`multistart_gpu_ids`**：例如 `[0, 1, 2, 3]`；启用多个独立进程并将每个进程固定到一块 GPU，要求同时设置 `use_cuda: true`
 - **`multistart_progress_interval_s`**：多 GPU 任务尚未完成时的进度心跳间隔，默认 `10` 秒
 - **`auto_de_fallback`** / **`auto_min_relative_improvement`**：控制自动全局回退
@@ -127,7 +131,7 @@ sim/
 - **`min_thickness_nm`**：单层最小厚度（nm，默认 `8`）；优化时抬高各材料厚度下界
 - **`max_total_thickness_nm`**：所有膜层总厚度的硬上限（nm）；超限候选会在保持单层边界的同时投影回可行域
 - **`thickness_bounds_nm`**：按材料设置优化全过程的硬边界 `[下限, 上限]`（nm）；未列出的材料沿用内置范围
-- **`multistart_sampling_bounds_nm`**：仅设置 Latin-hypercube 初值采样范围；必须位于对应的 `thickness_bounds_nm` 之内，未列出的材料沿用厚度硬边界
+- **`multistart_sampling_bounds_nm`**：设置 LHS/Sobol/Extra Trees 候选的初值采样范围；必须位于对应的 `thickness_bounds_nm` 之内，未列出的材料沿用厚度硬边界
 - **`mini_batch`**：`true` 或嵌套对象 `{"batch_size", "n_batches", "n_epochs", "shuffle_seed"}`；在 `method=adam` 或 `multistart_method=adam` 时生效
 - **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.txt`，并追加 `best_updates.csv`
 - **`use_cuda`**：`true` 时走 CuPy 批量 TMM（仅 NVIDIA CUDA；macOS 不可用）
@@ -155,6 +159,13 @@ Multistart + mini-batch Adam：
   "method": "multistart",
   "multistart_n": 8,
   "multistart_method": "adam",
+  "multistart_sampler": "extra_trees",
+  "multistart_candidate_n": 256,
+  "surrogate_trees": 200,
+  "surrogate_exploration_beta": 1.0,
+  "surrogate_pool_n": 10000,
+  "surrogate_diversity_weight": 0.1,
+  "multistart_final_polish_method": "trf",
   "adam_lr_nm": 2.0,
   "mini_batch": {
     "batch_size": 8,

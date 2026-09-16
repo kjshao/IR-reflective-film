@@ -961,6 +961,19 @@ def run(stack_path: str, cfg_path: str) -> int:
             if cfg.get("multistart_seed") is not None
             else None
         ),
+        multistart_sampler=str(cfg.get("multistart_sampler", "lhs")),
+        multistart_candidate_n=int(cfg.get("multistart_candidate_n", 256)),
+        surrogate_trees=int(cfg.get("surrogate_trees", 200)),
+        surrogate_exploration_beta=float(
+            cfg.get("surrogate_exploration_beta", 1.0)
+        ),
+        surrogate_pool_n=int(cfg.get("surrogate_pool_n", 10000)),
+        surrogate_diversity_weight=float(
+            cfg.get("surrogate_diversity_weight", 0.1)
+        ),
+        multistart_final_polish_method=cfg.get(
+            "multistart_final_polish_method"
+        ),
         multistart_gpu_ids=multistart_gpu_ids,
         multistart_progress_interval_s=float(
             cfg.get("multistart_progress_interval_s", 10.0)
@@ -1020,6 +1033,11 @@ def run(stack_path: str, cfg_path: str) -> int:
     print(f"  stack: {stack_path}")
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
+    if method in ("auto", "hybrid", "multistart", "multi_start", "multi-start"):
+        print(
+            f"  multistart_sampler: {opt.multistart_sampler}  "
+            f"n={opt.multistart_n}"
+        )
     print(f"  min_thickness_nm: {opt.min_thickness / _NM:g}")
     if opt.max_total_thickness is not None:
         print(

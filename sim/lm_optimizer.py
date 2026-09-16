@@ -473,6 +473,13 @@ class LMThicknessOptimizer:
         multistart_n: int = 8,
         multistart_method: str = "trf",
         multistart_seed: int | None = 0,
+        multistart_sampler: str = "lhs",
+        multistart_candidate_n: int = 256,
+        surrogate_trees: int = 200,
+        surrogate_exploration_beta: float = 1.0,
+        surrogate_pool_n: int = 10000,
+        surrogate_diversity_weight: float = 0.1,
+        multistart_final_polish_method: str | None = None,
         multistart_gpu_ids: Sequence[int] | None = None,
         multistart_progress_interval_s: float = 10.0,
         multistart_sampling_bounds: (
@@ -543,6 +550,31 @@ class LMThicknessOptimizer:
         self.multistart_n = max(1, int(multistart_n))
         self.multistart_method = str(multistart_method).lower().strip()
         self.multistart_seed = multistart_seed
+        self.multistart_sampler = (
+            str(multistart_sampler).lower().strip().replace("-", "_")
+        )
+        if self.multistart_sampler not in ("lhs", "sobol", "extra_trees"):
+            raise ValueError(
+                "multistart_sampler must be lhs|sobol|extra_trees"
+            )
+        self.multistart_candidate_n = max(
+            self.multistart_n - 1,
+            int(multistart_candidate_n),
+        )
+        self.surrogate_trees = max(10, int(surrogate_trees))
+        self.surrogate_exploration_beta = max(
+            0.0, float(surrogate_exploration_beta)
+        )
+        self.surrogate_pool_n = max(
+            self.multistart_n - 1,
+            int(surrogate_pool_n),
+        )
+        self.surrogate_diversity_weight = max(
+            0.0, float(surrogate_diversity_weight)
+        )
+        self.multistart_final_polish_method = resolve_global_polish_method(
+            multistart_final_polish_method
+        )
         if multistart_gpu_ids is not None and any(
             isinstance(device, bool) or not isinstance(device, int)
             for device in multistart_gpu_ids
@@ -1191,6 +1223,215 @@ class LMThicknessOptimizer:
             start_cost=start_cost,
         )
 
+    @staticmethod
+    def _sobol_unit_points(
+        n_points: int,
+        n_dim: int,
+        seed: int | None,
+    ) -> list[list[float]]:
+        if n_points <= 0:
+            return []
+        from scipy.stats import qmc
+
+        sampler = qmc.Sobol(d=n_dim, scramble=True, seed=seed)
+        power = max(0, math.ceil(math.log2(n_points)))
+        return sampler.random_base2(power).tolist()[:n_points]
+
+    def _unit_to_multistart(
+        self,
+        unit: Sequence[float],
+        materials: Sequence[str],
+        x0: Sequence[float],
+        free: Sequence[int],
+    ) -> list[float]:
+        x = list(x0)
+        for value, j in zip(unit, free):
+            lo, hi = self.multistart_bounds_for(materials[j])
+            x[j] = lo + float(value) * (hi - lo)
+        return self._project(materials, x, free)
+
+    def _normalise_multistart(
+        self,
+        x: Sequence[float],
+        materials: Sequence[str],
+        free: Sequence[int],
+    ) -> list[float]:
+        out = []
+        for j in free:
+            lo, hi = self.multistart_bounds_for(materials[j])
+            out.append(min(1.0, max(0.0, (x[j] - lo) / (hi - lo))))
+        return out
+
+    def _lhs_multistart_starts(
+        self,
+        materials: Sequence[str],
+        x0: Sequence[float],
+        free: Sequence[int],
+        n_random: int,
+    ) -> list[list[float]]:
+        rng = random.Random(self.multistart_seed)
+        bins = list(range(n_random))
+        per_dim_bins: dict[int, list[int]] = {}
+        for j in free:
+            shuffled = list(bins)
+            rng.shuffle(shuffled)
+            per_dim_bins[j] = shuffled
+        starts = []
+        for i in range(n_random):
+            unit = [
+                (per_dim_bins[j][i] + rng.random()) / max(1, n_random)
+                for j in free
+            ]
+            starts.append(self._unit_to_multistart(unit, materials, x0, free))
+        return starts
+
+    def _extra_trees_multistart_starts(
+        self,
+        materials: Sequence[str],
+        x0: Sequence[float],
+        free: Sequence[int],
+        n_random: int,
+        *,
+        verbose: bool,
+    ) -> list[list[float]]:
+        try:
+            import numpy as np
+            from sklearn.ensemble import ExtraTreesRegressor
+        except ImportError as exc:
+            raise ImportError(
+                "multistart_sampler=extra_trees requires scikit-learn; "
+                "pip install scikit-learn"
+            ) from exc
+
+        candidate_n = max(n_random, self.multistart_candidate_n)
+        train_unit = self._sobol_unit_points(
+            candidate_n,
+            len(free),
+            self.multistart_seed,
+        )
+        train_starts = [
+            self._unit_to_multistart(unit, materials, x0, free)
+            for unit in train_unit
+        ]
+        train_x = [
+            self._normalise_multistart(start, materials, free)
+            for start in train_starts
+        ]
+        train_y = []
+        report_every = max(1, candidate_n // 10)
+        for i, start in enumerate(train_starts, 1):
+            train_y.append(self.cost(list(zip(materials, start))))
+            if verbose and (i == 1 or i % report_every == 0 or i == candidate_n):
+                print(
+                    f"    surrogate prescreen: {i}/{candidate_n}  "
+                    f"best={min(train_y):.6e}",
+                    flush=True,
+                )
+
+        model = ExtraTreesRegressor(
+            n_estimators=self.surrogate_trees,
+            random_state=self.multistart_seed,
+            n_jobs=-1,
+        )
+        model.fit(np.asarray(train_x), np.asarray(train_y))
+
+        pool_seed = (
+            None
+            if self.multistart_seed is None
+            else int(self.multistart_seed) + 1
+        )
+        pool_unit = self._sobol_unit_points(
+            self.surrogate_pool_n,
+            len(free),
+            pool_seed,
+        )
+        pool_starts = [
+            self._unit_to_multistart(unit, materials, x0, free)
+            for unit in pool_unit
+        ]
+        pool_x = np.asarray(
+            [
+                self._normalise_multistart(start, materials, free)
+                for start in pool_starts
+            ]
+        )
+        tree_predictions = np.asarray(
+            [tree.predict(pool_x) for tree in model.estimators_]
+        )
+        prediction = tree_predictions.mean(axis=0)
+        uncertainty = tree_predictions.std(axis=0)
+        lcb = prediction - self.surrogate_exploration_beta * uncertainty
+        score_span = float(np.ptp(lcb))
+        normalized_score = (
+            (lcb - float(np.min(lcb))) / score_span
+            if score_span > 0.0
+            else np.zeros_like(lcb)
+        )
+
+        best_train = min(range(candidate_n), key=lambda i: train_y[i])
+        selected_starts = [train_starts[best_train]]
+        selected_x = [np.asarray(train_x[best_train])]
+        available = set(range(len(pool_starts)))
+        while len(selected_starts) < n_random and available:
+            best_index = min(
+                available,
+                key=lambda i: float(normalized_score[i])
+                - self.surrogate_diversity_weight
+                * min(
+                    float(np.sqrt(np.mean((pool_x[i] - chosen) ** 2)))
+                    for chosen in selected_x
+                ),
+            )
+            available.remove(best_index)
+            selected_starts.append(pool_starts[best_index])
+            selected_x.append(pool_x[best_index])
+
+        if verbose:
+            print(
+                f"    surrogate selected: starts={len(selected_starts)}  "
+                f"candidates={candidate_n}  pool={len(pool_starts)}  "
+                f"trees={self.surrogate_trees}",
+                flush=True,
+            )
+        return selected_starts
+
+    def _generate_multistart_starts(
+        self,
+        materials: Sequence[str],
+        x0: Sequence[float],
+        free: Sequence[int],
+        *,
+        verbose: bool,
+    ) -> list[list[float]]:
+        n_random = self.multistart_n - 1
+        starts = [list(x0)]
+        if n_random <= 0:
+            return starts
+        if self.multistart_sampler == "lhs":
+            random_starts = self._lhs_multistart_starts(
+                materials, x0, free, n_random
+            )
+        elif self.multistart_sampler == "sobol":
+            units = self._sobol_unit_points(
+                n_random,
+                len(free),
+                self.multistart_seed,
+            )
+            random_starts = [
+                self._unit_to_multistart(unit, materials, x0, free)
+                for unit in units
+            ]
+        else:
+            random_starts = self._extra_trees_multistart_starts(
+                materials,
+                x0,
+                free,
+                n_random,
+                verbose=verbose,
+            )
+        starts.extend(random_starts)
+        return starts
+
     def _optimize_multistart(
         self,
         layers: Sequence[tuple[str, float]],
@@ -1213,22 +1454,18 @@ class LMThicknessOptimizer:
                 f"multistart_method must be trf|lbfgs|lm|cg|adam, got {local!r}"
             )
 
-        rng = random.Random(self.multistart_seed)
-        starts = [list(x0)]
-        n_random = self.multistart_n - 1
-        bins = list(range(n_random))
-        per_dim_bins: dict[int, list[int]] = {}
-        for j in free:
-            shuffled = list(bins)
-            rng.shuffle(shuffled)
-            per_dim_bins[j] = shuffled
-        for i in range(n_random):
-            x = list(x0)
-            for j in free:
-                lo, hi = self.multistart_bounds_for(materials[j])
-                u = (per_dim_bins[j][i] + rng.random()) / max(1, n_random)
-                x[j] = lo + u * (hi - lo)
-            starts.append(x)
+        starts = self._generate_multistart_starts(
+            materials,
+            x0,
+            free,
+            verbose=verbose,
+        )
+        if verbose:
+            print(
+                f"    multistart sampler: {self.multistart_sampler}  "
+                f"starts={len(starts)}",
+                flush=True,
+            )
 
         original_method = self.method
         original_callback = self.on_best
@@ -1325,13 +1562,40 @@ class LMThicknessOptimizer:
                 best = candidate
         start_cost = self.cost(list(zip(materials, x0)))
         history = [start_cost] + [r.cost for r in results]
+        polish = None
+        if self.multistart_final_polish_method != "none":
+            polish_method = self.multistart_final_polish_method
+            if verbose:
+                print(
+                    f"    multistart final polish: method={polish_method}  "
+                    f"start={best.cost:.6e}",
+                    flush=True,
+                )
+            saved_method = self.method
+            try:
+                self.method = polish_method
+                polish = self.optimize(
+                    best.layers,
+                    free_indices=free,
+                    verbose=verbose,
+                )
+            finally:
+                self.method = saved_method
+            history.append(polish.cost)
+            if is_better_checkpoint(polish.cost, best.cost):
+                best = polish
         self._begin_run(x0, start_cost)
         self._notify_best(
             best.layers,
             best.cost,
             stage=f"multistart_{local}",
-            iter=results.index(best) + 1,
-            n_eval=sum(r.n_iter for r in results),
+            iter=(
+                len(results) + 1
+                if polish is not None and best is polish
+                else results.index(best) + 1
+            ),
+            n_eval=sum(r.n_iter for r in results)
+            + (polish.n_iter if polish is not None else 0),
             n_improve=sum(r.cost < r.start_cost for r in results),
             force=True,
         )
@@ -1341,13 +1605,17 @@ class LMThicknessOptimizer:
                 f"best={best.cost:.6e}  Δ={best.cost-start_cost:+.3e}",
                 flush=True,
             )
+        message = f"multistart({local}, n={len(starts)})"
+        if polish is not None:
+            message += f"->{self.multistart_final_polish_method}"
         return self._make_result(
             best_layers=best.layers,
             best_cost=best.cost,
             best_r=best.residuals,
-            n_iter=sum(r.n_iter for r in results),
+            n_iter=sum(r.n_iter for r in results)
+            + (polish.n_iter if polish is not None else 0),
             success=best.cost < start_cost,
-            message=f"multistart({local}, n={len(starts)})",
+            message=message,
             history=history,
             best_iter=history.index(min(history)),
             final_layers=best.final_layers or best.layers,

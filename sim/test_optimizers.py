@@ -182,6 +182,57 @@ class TRFTests(unittest.TestCase):
                 ),
             )
 
+    def test_sobol_multistart_sampling_is_bounded_and_reproducible(self):
+        kwargs = dict(
+            method="multistart",
+            multistart_n=8,
+            multistart_seed=5,
+            multistart_sampler="sobol",
+            thickness_bounds=parse_thickness_bounds_nm({"x": [50, 450]}),
+            multistart_sampling_bounds=parse_multistart_sampling_bounds_nm(
+                {"x": [100, 150]}
+            ),
+        )
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.4)],
+            **kwargs,
+        )
+        starts = optimizer._generate_multistart_starts(
+            ["x"], [120e-9], [0], verbose=False
+        )
+        repeated = optimizer._generate_multistart_starts(
+            ["x"], [120e-9], [0], verbose=False
+        )
+        self.assertEqual(starts, repeated)
+        self.assertEqual(len(starts), 8)
+        for start in starts[1:]:
+            self.assertGreaterEqual(start[0], 100e-9)
+            self.assertLessEqual(start[0], 150e-9)
+
+    def test_extra_trees_sampler_selects_requested_start_count(self):
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.4)],
+            method="multistart",
+            multistart_n=4,
+            multistart_seed=5,
+            multistart_sampler="extra_trees",
+            multistart_candidate_n=16,
+            surrogate_trees=10,
+            surrogate_pool_n=32,
+            thickness_weight=0.0,
+            thickness_bounds=parse_thickness_bounds_nm({"x": [50, 450]}),
+            multistart_sampling_bounds=parse_multistart_sampling_bounds_nm(
+                {"x": [100, 300]}
+            ),
+        )
+        starts = optimizer._generate_multistart_starts(
+            ["x"], [120e-9], [0], verbose=False
+        )
+        self.assertEqual(len(starts), 4)
+        self.assertEqual(starts[0], [120e-9])
+
     def test_invalid_json_thickness_bounds_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "min_nm < max_nm"):
             parse_thickness_bounds_nm({"tio2": [200, 100]})
@@ -210,10 +261,12 @@ class TRFTests(unittest.TestCase):
             n_batches=1,
             n_epochs=2,
             shuffle_seed=4,
+            multistart_final_polish_method="trf",
         )
         full_wavelengths = list(optimizer.wavelengths)
         result = optimizer.optimize([("x", 100e-9)], verbose=False)
         self.assertIn("multistart(adam", result.message)
+        self.assertTrue(result.message.endswith("->trf"))
         self.assertEqual(optimizer.wavelengths, full_wavelengths)
         self.assertLess(result.cost, result.start_cost)
 

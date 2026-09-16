@@ -295,6 +295,8 @@ $$
 ### 4.5 多起点与自动回退
 
 - `method=multistart`：Latin-hypercube 生成多个厚度初值，每个初值运行 TRF（也可选 L-BFGS-B/LM/CG/Adam）；选择 Adam 时可启用波长 mini-batch。
+- `multistart_sampler=sobol`：使用低差异 Sobol 序列改善高维空间覆盖。
+- `multistart_sampler=extra_trees`：Sobol 候选预筛选后训练 Extra Trees，以预测 loss、树间不确定度和候选距离联合选择起点；可在多起点结束后用 TRF 精修最优结果。
 - `method=auto`：先多起点局部优化；若指标仍未满足或相对改善不足，自动执行 DE，再用局部方法 polish。
 - TMM 计算较便宜时，多起点通常比直接全空间运行大种群更节省预算。
 
@@ -714,7 +716,10 @@ python3 sim/optimize_film.py \
 | `method` | `auto` | 多起点 TRF，未达标或改善不足时 DE 回退 |
 | `multistart_n` | 4–12 | Latin-hypercube 初值数量 |
 | `multistart_method` | `trf` | 每个初值采用的有界局部方法 |
-| `multistart_sampling_bounds_nm` | 按设计设定 | 仅限制 Latin-hypercube 初值采样；局部优化仍使用厚度硬边界 |
+| `multistart_sampler` | `lhs` / `sobol` / `extra_trees` | 多起点生成或代理引导方式 |
+| `multistart_candidate_n` | 256 | Extra Trees 训练前计算真实 loss 的 Sobol 候选数 |
+| `surrogate_pool_n` | 10000 | 代理模型用于挑选起点的候选池大小 |
+| `multistart_sampling_bounds_nm` | 按设计设定 | 限制 LHS/Sobol/Extra Trees 候选采样；局部优化仍使用厚度硬边界 |
 | `auto_min_relative_improvement` | 0.01 | 触发 DE 回退的最小相对改善 |
 | `min_thickness_nm` | 8（默认） | 单层最小厚度（nm）；抬高优化厚度下界 |
 | `max_total_thickness_nm` | 按工艺设定 | 所有膜层总厚度硬上限；候选点超限时投影回可行域 |

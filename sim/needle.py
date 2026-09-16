@@ -635,6 +635,19 @@ def make_optimizer_from_config(
         multistart_n=int(cfg.get("multistart_n", 8)),
         multistart_method=cfg.get("multistart_method", "trf"),
         multistart_seed=cfg.get("multistart_seed", 0),
+        multistart_sampler=cfg.get("multistart_sampler", "lhs"),
+        multistart_candidate_n=int(cfg.get("multistart_candidate_n", 256)),
+        surrogate_trees=int(cfg.get("surrogate_trees", 200)),
+        surrogate_exploration_beta=float(
+            cfg.get("surrogate_exploration_beta", 1.0)
+        ),
+        surrogate_pool_n=int(cfg.get("surrogate_pool_n", 10000)),
+        surrogate_diversity_weight=float(
+            cfg.get("surrogate_diversity_weight", 0.1)
+        ),
+        multistart_final_polish_method=cfg.get(
+            "multistart_final_polish_method"
+        ),
         multistart_gpu_ids=cfg.get("multistart_gpu_ids"),
         multistart_progress_interval_s=float(
             cfg.get("multistart_progress_interval_s", 10.0)

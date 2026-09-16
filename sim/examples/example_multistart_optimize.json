@@ -1,17 +1,24 @@
 {
-  "comment": "Generate an alternating TiO2/SiO2 stack, then run multi-start TRF.",
+  "comment": "Sobol prescreen + Extra Trees guided starts + mini-batch Adam + final TRF.",
   "stack_init": {
     "mode": "hlh",
     "high_material": "tio2",
     "low_material": "sio2",
     "incident_medium": "air",
     "substrate": "glass",
-    "design_wavelength_nm": 1000
+    "design_wavelength_nm": 1380
   },
   "method": "multistart",
-  "multistart_method": "trf",
+  "multistart_method": "adam",
   "multistart_n": 8,
   "multistart_seed": 0,
+  "multistart_sampler": "extra_trees",
+  "multistart_candidate_n": 256,
+  "surrogate_trees": 200,
+  "surrogate_exploration_beta": 1.0,
+  "surrogate_pool_n": 10000,
+  "surrogate_diversity_weight": 0.1,
+  "multistart_final_polish_method": "trf",
   "auto_de_fallback": true,
   "auto_min_relative_improvement": 0.01,
   "de_popsize": 12,
@@ -51,8 +58,15 @@
     "sio2": [8, 550]
   },
   "multistart_sampling_bounds_nm": {
-    "tio2": [40, 180],
-    "sio2": [60, 250]
+    "tio2": [107, 204],
+    "sio2": [165, 312]
+  },
+  "adam_lr_nm": 2.0,
+  "mini_batch": {
+    "batch_size": 8,
+    "n_batches": 10,
+    "n_epochs": 40,
+    "shuffle_seed": 0
   },
   "thickness_weight": 0.0,
   "nk_source": "library",
