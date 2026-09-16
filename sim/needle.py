@@ -635,6 +635,9 @@ def make_optimizer_from_config(
         multistart_method=cfg.get("multistart_method", "trf"),
         multistart_seed=cfg.get("multistart_seed", 0),
         multistart_gpu_ids=cfg.get("multistart_gpu_ids"),
+        multistart_progress_interval_s=float(
+            cfg.get("multistart_progress_interval_s", 10.0)
+        ),
         auto_de_fallback=bool(cfg.get("auto_de_fallback", True)),
         auto_min_relative_improvement=float(
             cfg.get("auto_min_relative_improvement", 0.01)

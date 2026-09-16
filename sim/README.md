@@ -112,6 +112,7 @@ sim/
 - **`auto`**：先运行 Latin-hypercube 多起点局部优化；若指标仍未满足或改善低于阈值，再运行 DE，并用局部方法 polish
 - **`multistart_n`** / **`multistart_method`** / **`multistart_seed`**：多起点数量、局部方法（默认 TRF）与随机种子
 - **`multistart_gpu_ids`**：例如 `[0, 1, 2, 3]`；启用多个独立进程并将每个进程固定到一块 GPU，要求同时设置 `use_cuda: true`
+- **`multistart_progress_interval_s`**：多 GPU 任务尚未完成时的进度心跳间隔，默认 `10` 秒
 - **`auto_de_fallback`** / **`auto_min_relative_improvement`**：控制自动全局回退
 - **`use_needle`**：允许改变层数；相关参数为 `max_layers`、`needle_candidate_mode`、`deep_search_candidates`、`needle_probe_nm`、`prune_threshold_nm`
 - **`cg_initial_step_nm`** / **`cg_max_step_nm`** / **`cg_restart`**：CG 专用（默认分别跟 `adam_lr_nm`、`adam_max_step_nm`、自由层数）
@@ -132,7 +133,8 @@ sim/
   "multistart_n": 8,
   "multistart_method": "trf",
   "use_cuda": true,
-  "multistart_gpu_ids": [0, 1, 2, 3]
+  "multistart_gpu_ids": [0, 1, 2, 3],
+  "multistart_progress_interval_s": 10
 }
 ```
 

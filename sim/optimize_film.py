@@ -960,6 +960,9 @@ def run(stack_path: str, cfg_path: str) -> int:
             else None
         ),
         multistart_gpu_ids=multistart_gpu_ids,
+        multistart_progress_interval_s=float(
+            cfg.get("multistart_progress_interval_s", 10.0)
+        ),
         auto_de_fallback=bool(cfg.get("auto_de_fallback", True)),
         auto_min_relative_improvement=float(
             cfg.get("auto_min_relative_improvement", 0.01)

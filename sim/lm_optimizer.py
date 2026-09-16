@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 import multiprocessing
 import random
-from concurrent.futures import ProcessPoolExecutor
+import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
@@ -14,6 +15,7 @@ from rt_calculator import RTCalculator
 
 _MULTISTART_WORKER_OPTIMIZER = None
 _MULTISTART_WORKER_FREE: list[int] | None = None
+_MULTISTART_WORKER_DEVICE: int | None = None
 
 
 def _init_multistart_gpu_worker(optimizer, free, device_queue) -> None:
@@ -22,23 +24,36 @@ def _init_multistart_gpu_worker(optimizer, free, device_queue) -> None:
 
     device_id = int(device_queue.get())
     cp.cuda.Device(device_id).use()
-    global _MULTISTART_WORKER_OPTIMIZER, _MULTISTART_WORKER_FREE
+    global _MULTISTART_WORKER_OPTIMIZER
+    global _MULTISTART_WORKER_FREE
+    global _MULTISTART_WORKER_DEVICE
     _MULTISTART_WORKER_OPTIMIZER = optimizer
     _MULTISTART_WORKER_FREE = list(free)
+    _MULTISTART_WORKER_DEVICE = device_id
 
 
 def _run_multistart_gpu_worker(job):
     """Run one local start using the optimizer owned by this GPU worker."""
-    index, materials, start = job
+    index, total, materials, start = job
     optimizer = _MULTISTART_WORKER_OPTIMIZER
     if optimizer is None:
         raise RuntimeError("multi-start GPU worker was not initialized")
+    device_id = _MULTISTART_WORKER_DEVICE
+    print(
+        f"    [GPU {device_id}] multistart {index + 1}/{total} started",
+        flush=True,
+    )
     result = optimizer.optimize(
         list(zip(materials, start)),
         free_indices=_MULTISTART_WORKER_FREE,
         verbose=False,
     )
-    return index, result
+    print(
+        f"    [GPU {device_id}] multistart {index + 1}/{total} done: "
+        f"cost={result.cost:.6e}  n_iter={result.n_iter}",
+        flush=True,
+    )
+    return index, device_id, result
 
 # Default physical bounds for dielectric layers (metres).
 DEFAULT_BOUNDS = {
@@ -448,6 +463,7 @@ class LMThicknessOptimizer:
         multistart_method: str = "trf",
         multistart_seed: int | None = 0,
         multistart_gpu_ids: Sequence[int] | None = None,
+        multistart_progress_interval_s: float = 10.0,
         auto_de_fallback: bool = True,
         auto_min_relative_improvement: float = 0.01,
         # Mini-batch Adam (wavelength subsets). Off by default → full-grid Adam.
@@ -523,6 +539,9 @@ class LMThicknessOptimizer:
             raise ValueError("multistart_gpu_ids must contain non-negative integers")
         if len(set(self.multistart_gpu_ids)) != len(self.multistart_gpu_ids):
             raise ValueError("multistart_gpu_ids must not contain duplicates")
+        self.multistart_progress_interval_s = max(
+            1.0, float(multistart_progress_interval_s)
+        )
         self.auto_de_fallback = bool(auto_de_fallback)
         self.auto_min_relative_improvement = max(
             0.0, float(auto_min_relative_improvement)
@@ -1133,16 +1152,51 @@ class LMThicknessOptimizer:
                 for device_id in gpu_ids:
                     device_queue.put(device_id)
                 jobs = [
-                    (i, materials, start)
+                    (i, len(starts), materials, start)
                     for i, start in enumerate(starts)
                 ]
+                indexed: list[tuple[int, OptimResult]] = []
+                started_at = time.monotonic()
                 with ProcessPoolExecutor(
                     max_workers=worker_count,
                     mp_context=ctx,
                     initializer=_init_multistart_gpu_worker,
                     initargs=(self, free, device_queue),
                 ) as executor:
-                    indexed = list(executor.map(_run_multistart_gpu_worker, jobs))
+                    pending = {
+                        executor.submit(_run_multistart_gpu_worker, job)
+                        for job in jobs
+                    }
+                    completed = 0
+                    while pending:
+                        done, pending = wait(
+                            pending,
+                            timeout=self.multistart_progress_interval_s,
+                            return_when=FIRST_COMPLETED,
+                        )
+                        if not done:
+                            if verbose:
+                                elapsed = time.monotonic() - started_at
+                                print(
+                                    f"    multistart progress: "
+                                    f"{completed}/{len(starts)} completed  "
+                                    f"elapsed={elapsed:.0f}s",
+                                    flush=True,
+                                )
+                            continue
+                        for future in done:
+                            index, device_id, result = future.result()
+                            indexed.append((index, result))
+                            completed += 1
+                            if verbose:
+                                elapsed = time.monotonic() - started_at
+                                print(
+                                    f"    multistart progress: "
+                                    f"{completed}/{len(starts)} completed  "
+                                    f"last=start {index + 1} GPU {device_id}  "
+                                    f"elapsed={elapsed:.0f}s",
+                                    flush=True,
+                                )
                 indexed.sort(key=lambda item: item[0])
                 results = [result for _, result in indexed]
                 device_queue.close()
