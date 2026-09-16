@@ -1,0 +1,51 @@
+{
+  "comment": "Generate an alternating TiO2/SiO2 stack, then run multi-start TRF.",
+  "stack_init": {
+    "mode": "hlh",
+    "high_material": "tio2",
+    "low_material": "sio2",
+    "incident_medium": "air",
+    "substrate": "glass",
+    "design_wavelength_nm": 1000
+  },
+  "method": "multistart",
+  "multistart_method": "trf",
+  "multistart_n": 8,
+  "multistart_seed": 0,
+  "bands": [
+    {
+      "wavelength_nm": [420, 700],
+      "objective": "minimize",
+      "R_target": 0.05,
+      "weight": 2.0
+    },
+    {
+      "wavelength_nm": [800, 1200],
+      "objective": "maximize",
+      "R_target": 0.95,
+      "weight": 1.5
+    },
+    {
+      "wavelength_nm": [1400, 1800],
+      "objective": "maximize",
+      "R_target": 0.90,
+      "weight": 1.0
+    }
+  ],
+  "init": {
+    "mode": "keep"
+  },
+  "max_iter": 40,
+  "wavelength_step_nm": 15,
+  "fd_step_nm": 0.5,
+  "min_thickness_nm": 8,
+  "thickness_weight": 0.0,
+  "nk_source": "library",
+  "incident_angle_deg": 0,
+  "polarization": "unpolarized",
+  "checkpoint_on_best": true,
+  "checkpoint_plot_rt": true,
+  "plot_wavelength_nm": [400, 1800],
+  "plot_step_nm": 5,
+  "output_dir": "../out/multistart_generated"
+}

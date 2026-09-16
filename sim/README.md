@@ -40,6 +40,7 @@ sim/.venv/bin/python sim/optimize_film.py \
 ```
 sim/
   optimize_film.py      # 入口：文本膜系 + JSON 配置、优化、出图
+  multistart_optimize.py # 按参数生成指定层数 H/L 膜系并执行多起点优化
   plot_rt_txt.py        # 文本膜系 R/T 计算与绘图
   plot_rt.py            # JSON 膜系 R/T 计算与绘图（含共享绘图工具）
   rt_calculator.py      # TMM / 外部 R/T 接口
@@ -53,6 +54,7 @@ sim/
   examples/
     example_stack.txt              # 文本膜系示例
     example_optimize_film.json     # 优化配置示例
+    example_multistart_optimize.json # 自动生成膜系的多起点配置
     example_plot_rt.json           # JSON 膜系绘图示例
     external_rt_stub.py            # 外部引擎桩
 ```
@@ -115,6 +117,21 @@ sim/
 - **`mini_batch`**：`true` 或嵌套对象 `{"batch_size", "n_batches", "n_epochs", "shuffle_seed"}`，仅 `method=adam` 时生效
 - **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.txt`，并追加 `best_updates.csv`
 - **`use_cuda`**：`true` 时走 CuPy 批量 TMM（仅 NVIDIA CUDA；macOS 不可用）
+
+## 指定层数并自动生成膜系
+
+`multistart_optimize.py` 根据层数生成交替 H/L 四分之一波长初始膜系，
+然后强制使用 `method=multistart` 优化厚度：
+
+```bash
+sim/.venv/bin/python sim/multistart_optimize.py \
+  --layers 8 \
+  --config sim/examples/example_multistart_optimize.json
+```
+
+可用 `--mode hlh|lhl` 覆盖首层材料顺序，或用 `--output-dir` 覆盖输出目录。
+配置中的 `stack_init.design_wavelength_nm` 决定初始四分之一波长厚度；
+也可直接设置 `high_thickness_nm`、`low_thickness_nm`。生成的 stack 和最终生效配置保存在输出目录的 `_inputs/` 中。
 
 ## 相关工具
 

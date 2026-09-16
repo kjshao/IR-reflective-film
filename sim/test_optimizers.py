@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import unittest
 
 from lm_optimizer import BandSpec, LMThicknessOptimizer, build_residuals
+from multistart_optimize import prepare_inputs
+from optimize_film import load_stack_txt
 
 
 class LinearReflectanceCalculator:
@@ -106,6 +111,39 @@ class TRFTests(unittest.TestCase):
         result = optimizer.optimize([("x", 80e-9)], verbose=False)
         self.assertIn("+de->", result.message)
         self.assertGreater(result.layers[0][1], 400e-9)
+
+
+class GeneratedStackTests(unittest.TestCase):
+    def test_prepare_inputs_generates_requested_layer_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = os.path.join(directory, "config.json")
+            with open(config_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "stack_init": {
+                            "mode": "lhl",
+                            "design_wavelength_nm": 900,
+                        },
+                        "bands": [
+                            {
+                                "wavelength_nm": [800, 1000],
+                                "objective": "maximize",
+                            }
+                        ],
+                        "output_dir": "result",
+                    },
+                    fh,
+                )
+            stack_path, effective_path = prepare_inputs(
+                n_layers=7, config_path=config_path
+            )
+            _incident, films, _substrate = load_stack_txt(stack_path)
+            self.assertEqual(len(films), 7)
+            self.assertEqual(films[0].material, "sio2")
+            with open(effective_path, encoding="utf-8") as fh:
+                effective = json.load(fh)
+            self.assertEqual(effective["method"], "multistart")
+            self.assertEqual(effective["generated_stack"]["layers"], 7)
 
 
 if __name__ == "__main__":
