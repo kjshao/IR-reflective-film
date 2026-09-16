@@ -952,7 +952,6 @@ def run(stack_path: str, cfg_path: str) -> int:
         da_visit=float(cfg.get("da_visit", 2.62)),
         da_accept=float(cfg.get("da_accept", -5.0)),
         checkpoint_local_every=cfg.get("checkpoint_local_every"),
-        checkpoint_delta_weight=float(cfg.get("checkpoint_delta_weight", 0.0)),
     )
 
     os.makedirs(out_dir, exist_ok=True)
@@ -973,7 +972,6 @@ def run(stack_path: str, cfg_path: str) -> int:
         print("  nk_source: fixed  (constant n,k from stack file)")
     if use_cuda:
         print("  use_cuda: True (CuPy wavelength-batched TMM)")
-    print(f"  checkpoint_delta_weight: {opt.checkpoint_delta_weight:g}")
     if checkpoint_on_best:
         print(f"  checkpoint_on_best: {os.path.join(out_dir, 'stack_best.txt')}")
     if opt.mini_batch:
@@ -1089,7 +1087,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     result_film_indices = (
         film_indices if len(result.layers) == len(film_indices) else None
     )
-    # Selected optimal: cost + thickness-Δ ranking.
+    # The selected optimum is the checkpoint with the lowest loss.
     layers_best = result.layers
     layers_final = result.final_layers if result.final_layers is not None else layers_best
     # Every method reports and optimizes the same residual least-squares merit.
@@ -1127,7 +1125,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         )
         print(f"  global loss={g.cost:.6e}", flush=True)
     print_band_report(
-        f"Best (cost+Δ, {'epoch' if opt.mini_batch else 'iter'} {best_iter})",
+        f"Best (lowest loss, {'epoch' if opt.mini_batch else 'iter'} {best_iter})",
         layers_best,
         rbands,
         opt.wavelengths,
@@ -1230,7 +1228,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         nk,
         film_indices=result_film_indices,
         header_lines=[
-            f"# best stack (cost+Δ)  method={method}  "
+            f"# best stack (lowest loss)  method={method}  "
             f"loss={best_cost:.12e}  Δ={best_delta:+.6e}  "
             f"best_iter={best_iter}  "
             f"n_iter={result.n_iter}  msg={result.message}",

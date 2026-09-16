@@ -311,19 +311,13 @@ $$
 
 ### 4.7 最优 checkpoint 选择
 
-不仅比较 cost，还比较相对初始厚度的 RMS 变化 $\Delta$（`checkpoint_score` / `is_better_checkpoint`）：
+checkpoint 严格按统一 loss 选择，不加入相对初始膜厚或日志 $\Delta$，
+也不使用膜厚变化打破平局。日志仍输出：
 
-$$
-\mathrm{score} = \mathrm{cost} + w_{\Delta} \cdot \frac{\mathrm{rms}_{\mathrm{nm}}}{100}
-$$
+- `Δ`：当前 loss 减去本轮起始 loss；
+- `thickness_delta_nm`：相对本轮起点的 RMS 膜厚变化。
 
-其中
-
-$$
-\mathrm{rms}_{\mathrm{nm}} = \sqrt{\frac{1}{N}\sum_{i=1}^{N}\bigl(d_i - d_i^{(0)}\bigr)^2}\times 10^{9}
-$$
-
-近并列时优先选厚度变化更小者，避免无意义的剧烈抖动。
+两者只用于观察优化过程，不参与 loss 计算、多起点选择、全局/局部结果比较或 best checkpoint 更新。
 
 ---
 
@@ -658,7 +652,7 @@ python3 sim/optimize_film.py \
 | 残差 / cost | `lm_optimizer.build_residuals` | ✅ 已实现 |
 | TRF / LM / Adam / CG / L-BFGS-B / DE / 双退火 | `lm_optimizer.LMThicknessOptimizer` | ✅ 已实现 |
 | 粗搜索 | `coarse_descent` | ✅ 已实现 |
-| checkpoint 选择 | `checkpoint_score`, `is_better_checkpoint` | ✅ 已实现 |
+| 仅按 loss 的 checkpoint 选择 | `is_better_checkpoint` | ✅ 已实现 |
 | Needle 合成层 | `needle.NeedleSynthesizer` | ✅ 已实现 |
 | 固定层数 R 极值优化 | `optimize_film.py` | ✅ 当前入口 |
 | Needle + 统一入口 | `optimize_film.py` + `needle.py` | ✅ `use_needle: true` |
@@ -723,7 +717,6 @@ python3 sim/optimize_film.py \
 | `auto_min_relative_improvement` | 0.01 | 触发 DE 回退的最小相对改善 |
 | `min_thickness_nm` | 8（默认） | 单层最小厚度（nm）；抬高优化厚度下界 |
 | `nk_source` | `library`（默认） / `fixed` | `library`：按材料名从色散库读 n(λ),k(λ)；`fixed`：用文本膜系常数 n,k |
-| `checkpoint_delta_weight` | 0 | $>0$ 时偏好厚度变化小的解 |
 | `de_popsize` | 12–20 | DE 种群规模 |
 | `global_polish_method` | `trf` | DE/退火后局部精修 |
 | `deep_search_candidates` | 2–5 | Needle 每轮进行完整精修的候选数量 |

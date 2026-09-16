@@ -7,7 +7,12 @@ import os
 import tempfile
 import unittest
 
-from lm_optimizer import BandSpec, LMThicknessOptimizer, build_residuals
+from lm_optimizer import (
+    BandSpec,
+    LMThicknessOptimizer,
+    build_residuals,
+    is_better_checkpoint,
+)
 from multistart_optimize import prepare_inputs
 from optimize_film import load_stack_txt
 
@@ -24,6 +29,11 @@ class LinearReflectanceCalculator:
 
 
 class ResidualTests(unittest.TestCase):
+    def test_checkpoint_selection_uses_loss_only(self):
+        self.assertTrue(is_better_checkpoint(0.1, 0.2))
+        self.assertFalse(is_better_checkpoint(0.2, 0.1))
+        self.assertFalse(is_better_checkpoint(0.1, 0.1))
+
     def test_all_inequality_directions_are_present(self):
         band = BandSpec(
             400e-9,

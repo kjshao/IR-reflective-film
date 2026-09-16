@@ -56,46 +56,12 @@ def thickness_rms_nm(x: Sequence[float], x0: Sequence[float]) -> float:
     return math.sqrt(acc / n)
 
 
-def checkpoint_score(
-    cost: float,
-    x: Sequence[float],
-    x0: Sequence[float],
-    *,
-    delta_weight: float = 0.0,
-) -> float:
-    """Lower is better. Balances absolute cost with thickness Δ from start.
-
-    ``score = cost + delta_weight * (rms_nm / 100)``.
-    With ``delta_weight == 0``, near-ties on cost still prefer smaller RMS Δ
-    via :func:`is_better_checkpoint`.
-    """
-    return float(cost) + float(delta_weight) * (thickness_rms_nm(x, x0) / 100.0)
-
-
 def is_better_checkpoint(
     cand_cost: float,
-    cand_x: Sequence[float],
     best_cost: float,
-    best_x: Sequence[float],
-    x0: Sequence[float],
-    *,
-    delta_weight: float = 0.0,
-    cost_rel_tol: float = 1e-6,
 ) -> bool:
-    """Whether ``cand`` should replace the running best (cost + thickness Δ)."""
-    if delta_weight > 0.0:
-        return (
-            checkpoint_score(cand_cost, cand_x, x0, delta_weight=delta_weight)
-            < checkpoint_score(best_cost, best_x, x0, delta_weight=delta_weight)
-            - 1e-15
-        )
-    # Pure cost, with near-tie broken by smaller thickness change from start.
-    if cand_cost < best_cost - 1e-12:
-        return True
-    tol = max(1e-12, abs(best_cost) * cost_rel_tol)
-    if abs(cand_cost - best_cost) <= tol:
-        return thickness_rms_nm(cand_x, x0) + 1e-15 < thickness_rms_nm(best_x, x0)
-    return False
+    """Whether ``cand`` has a strictly lower loss than the running best."""
+    return float(cand_cost) < float(best_cost) - 1e-15
 
 
 @dataclass
@@ -431,9 +397,6 @@ class LMThicknessOptimizer:
         # Local (LM/Adam) best checkpoints: every N iters, or every N epochs
         # for mini-batch Adam. Default: 5 (iters) / 1 (epochs if mini-batch).
         checkpoint_local_every: int | None = None,
-        # Weight on RMS thickness change (nm/100) when ranking checkpoints.
-        # 0 = minimize cost; near-ties prefer smaller thickness Δ from start.
-        checkpoint_delta_weight: float = 0.0,
         # Minimum free-layer thickness (metres). Unit in JSON configs: nm
         # via ``min_thickness_nm`` (default 8 nm). Raises per-material floors.
         min_thickness: float = 8e-9,
@@ -507,7 +470,6 @@ class LMThicknessOptimizer:
             self.checkpoint_local_every = 1 if self.mini_batch else 5
         else:
             self.checkpoint_local_every = max(1, int(checkpoint_local_every))
-        self.checkpoint_delta_weight = float(checkpoint_delta_weight)
         # Optional: on_best(layers, cost, info_dict) when the running best improves.
         self.on_best: Callable[..., None] | None = None
         self._last_notified_cost: float | None = None
@@ -515,7 +477,7 @@ class LMThicknessOptimizer:
         self._run_start_x: list[float] | None = None
 
     def _begin_run(self, x0: Sequence[float], start_cost: float) -> None:
-        """Remember run start for Δcost / thickness-Δ checkpoint ranking."""
+        """Remember the run start for progress-only Δ logging."""
         self._run_start_cost = float(start_cost)
         self._run_start_x = [float(v) for v in x0]
 
@@ -527,17 +489,9 @@ class LMThicknessOptimizer:
         best_cost: float,
         x0: Sequence[float] | None = None,
     ) -> bool:
-        ref = x0 if x0 is not None else self._run_start_x
-        if ref is None:
-            ref = cand_x
-        return is_better_checkpoint(
-            cand_cost,
-            cand_x,
-            best_cost,
-            best_x,
-            ref,
-            delta_weight=self.checkpoint_delta_weight,
-        )
+        # Thickness vectors remain in the signature for call-site stability;
+        # checkpoint selection is deliberately based on loss alone.
+        return is_better_checkpoint(cand_cost, best_cost)
 
     def _notify_best(
         self,
@@ -1078,11 +1032,7 @@ class LMThicknessOptimizer:
         for candidate in results[1:]:
             if is_better_checkpoint(
                 candidate.cost,
-                [d for _, d in candidate.layers],
                 best.cost,
-                [d for _, d in best.layers],
-                x0,
-                delta_weight=self.checkpoint_delta_weight,
             ):
                 best = candidate
         start_cost = self.cost(list(zip(materials, x0)))
@@ -1156,15 +1106,7 @@ class LMThicknessOptimizer:
             self.method = saved_method
             self.global_polish_method = saved_polish
 
-        x0 = [d for _, d in layers]
-        if is_better_checkpoint(
-            global_result.cost,
-            [d for _, d in global_result.layers],
-            local.cost,
-            [d for _, d in local.layers],
-            x0,
-            delta_weight=self.checkpoint_delta_weight,
-        ):
+        if is_better_checkpoint(global_result.cost, local.cost):
             winner = global_result
         else:
             winner = local
@@ -1306,7 +1248,7 @@ class LMThicknessOptimizer:
         if polish == "none":
             return global_result
 
-        # Preserve global-run start for cost+Δ ranking across polish.
+        # Preserve the global-run start for progress logging across polish.
         saved_start_x = list(self._run_start_x or [d for _, d in layers])
         saved_start_cost = self._run_start_cost
 
@@ -1361,7 +1303,7 @@ class LMThicknessOptimizer:
             best_cost,
             x0=saved_start_x,
         ):
-            # Global stage wins on cost+Δ ranking.
+            # Global stage has the lower loss.
             best_layers = list(global_result.layers)
             best_cost = float(global_result.cost)
             best_r = list(global_result.residuals)

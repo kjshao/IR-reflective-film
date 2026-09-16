@@ -649,7 +649,6 @@ def make_optimizer_from_config(
         da_visit=float(cfg.get("da_visit", 2.62)),
         da_accept=float(cfg.get("da_accept", -5.0)),
         checkpoint_local_every=cfg.get("checkpoint_local_every"),
-        checkpoint_delta_weight=float(cfg.get("checkpoint_delta_weight", 0.0)),
         min_thickness=(
             float(cfg["min_thickness"])
             if cfg.get("min_thickness") is not None
