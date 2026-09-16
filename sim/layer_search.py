@@ -532,7 +532,7 @@ class ParetoBeamLayerSearch:
         self.opt.multistart_sampler = "optical_qw"
         self.opt.optical_sampler_fraction = optical / total
         self.opt.max_iter = self.config.coarse_local_max_iter
-        self.opt.multistart_final_polish_method = None
+        self.opt.multistart_final_polish_method = "none"
         self.opt.on_best = None
         self.opt._set_wavelengths(
             wavelength_grid(self.opt.bands, self.config.coarse_wavelength_step)

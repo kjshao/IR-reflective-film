@@ -106,7 +106,7 @@ class LayerSearchTests(unittest.TestCase):
             max_generations=2,
             stagnation_generations=1,
             coarse_optical_starts=1,
-            coarse_sobol_starts=0,
+            coarse_sobol_starts=1,
             coarse_local_max_iter=1,
             pareto_archive_size=12,
             preserve_per_band=1,
