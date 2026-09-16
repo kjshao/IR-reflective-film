@@ -648,6 +648,26 @@ def make_optimizer_from_config(
         surrogate_selection_gpu_min_work=int(
             cfg.get("surrogate_selection_gpu_min_work", 10_000_000)
         ),
+        optical_q_range=cfg.get("optical_q_range", (0.6, 1.4)),
+        optical_wavelength_range=(
+            cfg.get("optical_wavelength_range")
+            if cfg.get("optical_wavelength_range") is not None
+            else (
+                tuple(
+                    float(value) * 1e-9
+                    for value in cfg["optical_wavelength_nm"]
+                )
+                if cfg.get("optical_wavelength_nm") is not None
+                else None
+            )
+        ),
+        optical_pair_shared_wavelength=bool(
+            cfg.get("optical_pair_shared_wavelength", True)
+        ),
+        optical_chirp=bool(cfg.get("optical_chirp", True)),
+        optical_sampler_fraction=float(
+            cfg.get("optical_sampler_fraction", 0.7)
+        ),
         multistart_final_polish_method=cfg.get(
             "multistart_final_polish_method"
         ),

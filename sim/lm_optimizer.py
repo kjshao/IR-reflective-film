@@ -547,6 +547,12 @@ class LMThicknessOptimizer:
         surrogate_pool_n: int = 10000,
         surrogate_diversity_weight: float = 0.1,
         surrogate_selection_gpu_min_work: int = 10_000_000,
+        # Physics-informed quarter-wave optical-thickness start sampling.
+        optical_q_range: Sequence[float] = (0.6, 1.4),
+        optical_wavelength_range: Sequence[float] | None = None,
+        optical_pair_shared_wavelength: bool = True,
+        optical_chirp: bool = True,
+        optical_sampler_fraction: float = 0.7,
         multistart_final_polish_method: str | None = None,
         multistart_gpu_ids: Sequence[int] | None = None,
         multistart_progress_interval_s: float = 10.0,
@@ -622,9 +628,14 @@ class LMThicknessOptimizer:
         self.multistart_sampler = (
             str(multistart_sampler).lower().strip().replace("-", "_")
         )
-        if self.multistart_sampler not in ("lhs", "sobol", "extra_trees"):
+        if self.multistart_sampler not in (
+            "lhs",
+            "sobol",
+            "extra_trees",
+            "optical_qw",
+        ):
             raise ValueError(
-                "multistart_sampler must be lhs|sobol|extra_trees"
+                "multistart_sampler must be lhs|sobol|extra_trees|optical_qw"
             )
         self.multistart_candidate_n = max(
             self.multistart_n - 1,
@@ -643,6 +654,41 @@ class LMThicknessOptimizer:
         )
         self.surrogate_selection_gpu_min_work = max(
             0, int(surrogate_selection_gpu_min_work)
+        )
+        if len(optical_q_range) != 2:
+            raise ValueError("optical_q_range must contain [lower, upper]")
+        q_lo, q_hi = (float(optical_q_range[0]), float(optical_q_range[1]))
+        if q_lo <= 0.0 or q_hi <= q_lo:
+            raise ValueError("optical_q_range requires 0 < lower < upper")
+        self.optical_q_range = (q_lo, q_hi)
+        if optical_wavelength_range is None:
+            active_bands = [b for b in self.bands if b.weight > 0.0]
+            if not active_bands:
+                active_bands = list(self.bands)
+            self.optical_wavelength_range = (
+                min(b.wl_lo for b in active_bands),
+                max(b.wl_hi for b in active_bands),
+            )
+        else:
+            if len(optical_wavelength_range) != 2:
+                raise ValueError(
+                    "optical_wavelength_range must contain [lower, upper]"
+                )
+            wl_lo, wl_hi = (
+                float(optical_wavelength_range[0]),
+                float(optical_wavelength_range[1]),
+            )
+            if wl_lo <= 0.0 or wl_hi <= wl_lo:
+                raise ValueError(
+                    "optical_wavelength_range requires 0 < lower < upper"
+                )
+            self.optical_wavelength_range = (wl_lo, wl_hi)
+        self.optical_pair_shared_wavelength = bool(
+            optical_pair_shared_wavelength
+        )
+        self.optical_chirp = bool(optical_chirp)
+        self.optical_sampler_fraction = min(
+            1.0, max(0.0, float(optical_sampler_fraction))
         )
         self.multistart_final_polish_method = resolve_global_polish_method(
             multistart_final_polish_method
@@ -1513,6 +1559,157 @@ class LMThicknessOptimizer:
             starts.append(self._unit_to_multistart(unit, materials, x0, free))
         return starts
 
+    def _sampling_refractive_index(self, material: str, wavelength: float) -> float:
+        """Real refractive index used by physics-informed start sampling."""
+        constant_index = getattr(self.calc, "_N", None)
+        if callable(constant_index):
+            try:
+                return max(1e-6, float(complex(constant_index(material)).real))
+            except (KeyError, TypeError, ValueError):
+                pass
+        try:
+            import dispersion as dsp
+
+            return max(
+                1e-6,
+                float(dsp.material_n(material, wavelength).real),
+            )
+        except (KeyError, TypeError, ValueError):
+            return 1.5
+
+    def _optical_qw_candidate(
+        self,
+        materials: Sequence[str],
+        x0: Sequence[float],
+        free: Sequence[int],
+        rng: random.Random,
+    ) -> list[float]:
+        """Map sampled design wavelengths and optical thicknesses to metres."""
+        x = list(x0)
+        n_groups = (
+            (len(free) + 1) // 2
+            if self.optical_pair_shared_wavelength
+            else len(free)
+        )
+        wl_lo, wl_hi = self.optical_wavelength_range
+        log_wl_lo, log_wl_hi = math.log(wl_lo), math.log(wl_hi)
+        wavelengths = [
+            math.exp(rng.uniform(log_wl_lo, log_wl_hi))
+            for _ in range(n_groups)
+        ]
+        if self.optical_chirp:
+            wavelengths.sort()
+
+        q_lo, q_hi = self.optical_q_range
+        log_q_lo, log_q_hi = math.log(q_lo), math.log(q_hi)
+        for position, j in enumerate(free):
+            group = position // 2 if self.optical_pair_shared_wavelength else position
+            wavelength = wavelengths[group]
+            q = math.exp(rng.uniform(log_q_lo, log_q_hi))
+            n_layer = self._sampling_refractive_index(
+                materials[j], wavelength
+            )
+            n_incident = self._sampling_refractive_index(
+                self.incident, wavelength
+            )
+            sin_theta = n_incident * math.sin(self.theta0) / n_layer
+            cos_theta = math.sqrt(max(1e-12, 1.0 - min(1.0, sin_theta**2)))
+            thickness = q * wavelength / (4.0 * n_layer * cos_theta)
+            lo, hi = self.multistart_bounds_for(materials[j])
+            x[j] = min(hi, max(lo, thickness))
+        return x
+
+    def _contract_optical_candidate_to_cap(
+        self,
+        candidate: Sequence[float],
+        materials: Sequence[str],
+        free: Sequence[int],
+        rng: random.Random,
+    ) -> list[float]:
+        """Preserve the optical profile while moving an over-cap point inside."""
+        x = list(candidate)
+        cap = self.max_total_thickness
+        if cap is None or sum(x) <= cap + 1e-15:
+            return self._project(materials, x, free)
+
+        free_set = set(free)
+        fixed_total = sum(x[i] for i in range(len(x)) if i not in free_set)
+        lows = {
+            j: self.multistart_bounds_for(materials[j])[0] for j in free
+        }
+        minimum = sum(lows.values())
+        excess_budget = cap - fixed_total - minimum
+        if excess_budget < -1e-15:
+            raise ValueError(
+                "max_total_thickness is infeasible for optical_qw sampling"
+            )
+        raw_excess = sum(max(0.0, x[j] - lows[j]) for j in free)
+        # Keep fallback points strictly distributed inside the cap instead of
+        # collapsing every rejected optical proposal onto its boundary.
+        target_excess = max(0.0, excess_budget) * rng.uniform(0.8, 0.995)
+        scale = (
+            min(1.0, target_excess / raw_excess)
+            if raw_excess > 0.0
+            else 0.0
+        )
+        for j in free:
+            x[j] = lows[j] + max(0.0, x[j] - lows[j]) * scale
+        return self._project(materials, x, free)
+
+    def _optical_qw_multistart_starts(
+        self,
+        materials: Sequence[str],
+        x0: Sequence[float],
+        free: Sequence[int],
+        n_random: int,
+    ) -> list[list[float]]:
+        """Physics-informed QW/chirped starts mixed with global Sobol starts."""
+        rng = random.Random(self.multistart_seed)
+        n_optical = min(
+            n_random,
+            max(0, int(round(n_random * self.optical_sampler_fraction))),
+        )
+        starts: list[list[float]] = []
+        for _ in range(n_optical):
+            candidate = None
+            # Rejection preserves the optical-thickness prior when feasible.
+            for _attempt in range(100):
+                proposal = self._optical_qw_candidate(
+                    materials, x0, free, rng
+                )
+                if (
+                    self.max_total_thickness is None
+                    or sum(proposal) <= self.max_total_thickness + 1e-15
+                ):
+                    candidate = self._project(materials, proposal, free)
+                    break
+                candidate = proposal
+            if candidate is None:
+                continue
+            starts.append(
+                self._contract_optical_candidate_to_cap(
+                    candidate, materials, free, rng
+                )
+            )
+
+        n_sobol = n_random - len(starts)
+        if n_sobol > 0:
+            sobol_seed = (
+                None
+                if self.multistart_seed is None
+                else int(self.multistart_seed) + 104729
+            )
+            units = self._sobol_unit_points(
+                n_sobol,
+                self._multistart_unit_dimensions(len(free)),
+                sobol_seed,
+            )
+            starts.extend(
+                self._unit_to_multistart(unit, materials, x0, free)
+                for unit in units
+            )
+        return starts
+
     def _select_surrogate_pool_indices(
         self,
         pool_x,
@@ -1770,6 +1967,10 @@ class LMThicknessOptimizer:
                 self._unit_to_multistart(unit, materials, x0, free)
                 for unit in units
             ]
+        elif self.multistart_sampler == "optical_qw":
+            random_starts = self._optical_qw_multistart_starts(
+                materials, x0, free, n_random
+            )
         else:
             random_starts = self._extra_trees_multistart_starts(
                 materials,

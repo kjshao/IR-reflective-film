@@ -982,6 +982,25 @@ def run(stack_path: str, cfg_path: str) -> int:
         surrogate_selection_gpu_min_work=int(
             cfg.get("surrogate_selection_gpu_min_work", 10_000_000)
         ),
+        optical_q_range=tuple(
+            float(value)
+            for value in cfg.get("optical_q_range", [0.6, 1.4])
+        ),
+        optical_wavelength_range=(
+            tuple(
+                _NM * float(value)
+                for value in cfg["optical_wavelength_nm"]
+            )
+            if cfg.get("optical_wavelength_nm") is not None
+            else None
+        ),
+        optical_pair_shared_wavelength=bool(
+            cfg.get("optical_pair_shared_wavelength", True)
+        ),
+        optical_chirp=bool(cfg.get("optical_chirp", True)),
+        optical_sampler_fraction=float(
+            cfg.get("optical_sampler_fraction", 0.7)
+        ),
         multistart_final_polish_method=cfg.get(
             "multistart_final_polish_method"
         ),
@@ -1050,6 +1069,15 @@ def run(stack_path: str, cfg_path: str) -> int:
             f"  multistart_sampler: {opt.multistart_sampler}  "
             f"n={opt.multistart_n}"
         )
+        if opt.multistart_sampler == "optical_qw":
+            print(
+                f"  optical_qw: q={opt.optical_q_range}  "
+                f"wavelength_nm="
+                f"{tuple(round(value / _NM, 3) for value in opt.optical_wavelength_range)}  "
+                f"pair_shared={opt.optical_pair_shared_wavelength}  "
+                f"chirp={opt.optical_chirp}  "
+                f"fraction={opt.optical_sampler_fraction:g}"
+            )
     print(f"  min_thickness_nm: {opt.min_thickness / _NM:g}")
     if opt.max_total_thickness is not None:
         print(

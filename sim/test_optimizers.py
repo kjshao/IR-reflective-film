@@ -32,6 +32,13 @@ class LinearReflectanceCalculator:
         )
 
 
+class FixedIndexCalculator(LinearReflectanceCalculator):
+    """Linear test spectrum plus known indices for optical-QW sampling."""
+
+    def _N(self, material):
+        return {"h": 2.0, "l": 1.5}[material]
+
+
 class ResidualTests(unittest.TestCase):
     def test_checkpoint_selection_uses_loss_only(self):
         self.assertTrue(is_better_checkpoint(0.1, 0.2))
@@ -213,7 +220,7 @@ class TRFTests(unittest.TestCase):
             self.assertLessEqual(start[0], 150e-9)
 
     def test_multistart_samples_directly_inside_total_thickness_cap(self):
-        for sampler in ("lhs", "sobol"):
+        for sampler in ("lhs", "sobol", "optical_qw"):
             with self.subTest(sampler=sampler):
                 optimizer = LMThicknessOptimizer(
                     LinearReflectanceCalculator(),
@@ -249,6 +256,46 @@ class TRFTests(unittest.TestCase):
                 self.assertTrue(
                     any(sum(start) < 240e-9 for start in random_starts)
                 )
+
+    def test_optical_qw_sampler_maps_shared_pair_wavelengths_to_thickness(self):
+        optimizer = LMThicknessOptimizer(
+            FixedIndexCalculator(),
+            [BandSpec(500e-9, 1500e-9, R_target=0.9)],
+            method="multistart",
+            multistart_n=8,
+            multistart_seed=11,
+            multistart_sampler="optical_qw",
+            optical_q_range=(0.999999, 1.000001),
+            optical_wavelength_range=(500e-9, 1500e-9),
+            optical_pair_shared_wavelength=True,
+            optical_chirp=True,
+            optical_sampler_fraction=1.0,
+            thickness_bounds={
+                "h": (10e-9, 500e-9),
+                "l": (10e-9, 500e-9),
+            },
+        )
+        starts = optimizer._generate_multistart_starts(
+            ["h", "l", "h", "l"],
+            [100e-9, 100e-9, 100e-9, 100e-9],
+            [0, 1, 2, 3],
+            verbose=False,
+        )
+        repeated = optimizer._generate_multistart_starts(
+            ["h", "l", "h", "l"],
+            [100e-9, 100e-9, 100e-9, 100e-9],
+            [0, 1, 2, 3],
+            verbose=False,
+        )
+        self.assertEqual(starts, repeated)
+        for start in starts[1:]:
+            first_h = 4.0 * 2.0 * start[0]
+            first_l = 4.0 * 1.5 * start[1]
+            second_h = 4.0 * 2.0 * start[2]
+            second_l = 4.0 * 1.5 * start[3]
+            self.assertAlmostEqual(first_h / first_l, 1.0, places=5)
+            self.assertAlmostEqual(second_h / second_l, 1.0, places=5)
+            self.assertLess(first_h, second_h)
 
     def test_total_cap_sampling_counts_fixed_layer_thickness(self):
         optimizer = LMThicknessOptimizer(
