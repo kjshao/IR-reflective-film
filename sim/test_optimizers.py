@@ -12,6 +12,7 @@ from lm_optimizer import (
     LMThicknessOptimizer,
     build_residuals,
     is_better_checkpoint,
+    parse_thickness_bounds_nm,
 )
 from multistart_optimize import prepare_inputs
 from optimize_film import load_stack_txt
@@ -70,6 +71,29 @@ class ResidualTests(unittest.TestCase):
 
 
 class TRFTests(unittest.TestCase):
+    def test_json_thickness_bounds_constrain_multistart_and_local_search(self):
+        bounds = parse_thickness_bounds_nm({"x": [100, 150]})
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.8)],
+            method="multistart",
+            multistart_n=4,
+            multistart_seed=2,
+            wavelength_step=20e-9,
+            thickness_weight=0.0,
+            max_iter=20,
+            min_thickness=8e-9,
+            thickness_bounds=bounds,
+        )
+        result = optimizer.optimize([("x", 120e-9)], verbose=False)
+        self.assertGreaterEqual(result.layers[0][1], 100e-9)
+        self.assertLessEqual(result.layers[0][1], 150e-9 + 1e-15)
+        self.assertAlmostEqual(result.layers[0][1] * 1e9, 150.0, places=3)
+
+    def test_invalid_json_thickness_bounds_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "min_nm < max_nm"):
+            parse_thickness_bounds_nm({"tio2": [200, 100]})
+
     def test_trf_finds_bounded_target_thickness(self):
         optimizer = LMThicknessOptimizer(
             LinearReflectanceCalculator(),

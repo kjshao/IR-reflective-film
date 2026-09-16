@@ -123,7 +123,47 @@ def resolve_global_polish_method(
     return "none"
 
 
-def _bounds_for(mat: str, min_thickness: float | None = None) -> tuple[float, float]:
+def parse_thickness_bounds_nm(value) -> dict[str, tuple[float, float]]:
+    """Parse JSON per-material thickness bounds and convert nm to metres."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("thickness_bounds_nm must be a JSON object")
+    parsed: dict[str, tuple[float, float]] = {}
+    for material, bounds in value.items():
+        if (
+            not isinstance(bounds, (list, tuple))
+            or len(bounds) != 2
+            or isinstance(bounds[0], bool)
+            or isinstance(bounds[1], bool)
+        ):
+            raise ValueError(
+                f"thickness_bounds_nm.{material} must be [min_nm, max_nm]"
+            )
+        try:
+            lo_nm, hi_nm = float(bounds[0]), float(bounds[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"thickness_bounds_nm.{material} must contain numbers"
+            ) from exc
+        if not math.isfinite(lo_nm) or not math.isfinite(hi_nm):
+            raise ValueError(
+                f"thickness_bounds_nm.{material} must contain finite numbers"
+            )
+        if lo_nm < 0.0 or hi_nm <= lo_nm:
+            raise ValueError(
+                f"thickness_bounds_nm.{material} requires 0 <= min_nm < max_nm"
+            )
+        key = str(material).lower().replace("-", "_")
+        parsed[key] = (lo_nm * 1e-9, hi_nm * 1e-9)
+    return parsed
+
+
+def _bounds_for(
+    mat: str,
+    min_thickness: float | None = None,
+    thickness_bounds: dict[str, tuple[float, float]] | None = None,
+) -> tuple[float, float]:
     """Return (lo, hi) thickness bounds in metres for ``mat``.
 
     ``min_thickness`` (metres) raises the lower bound for every material:
@@ -131,7 +171,8 @@ def _bounds_for(mat: str, min_thickness: float | None = None) -> tuple[float, fl
     ``lo`` is clamped to ``hi``.
     """
     key = mat.lower().replace("-", "_")
-    lo, hi = DEFAULT_BOUNDS.get(key, (10e-9, 500e-9))
+    configured = thickness_bounds or {}
+    lo, hi = configured.get(key, DEFAULT_BOUNDS.get(key, (10e-9, 500e-9)))
     if min_thickness is not None:
         lo = max(lo, float(min_thickness))
         if lo > hi:
@@ -400,6 +441,9 @@ class LMThicknessOptimizer:
         # Minimum free-layer thickness (metres). Unit in JSON configs: nm
         # via ``min_thickness_nm`` (default 8 nm). Raises per-material floors.
         min_thickness: float = 8e-9,
+        # Optional per-material (lo, hi) bounds in metres. JSON configs use
+        # ``thickness_bounds_nm`` and are converted before construction.
+        thickness_bounds: dict[str, tuple[float, float]] | None = None,
     ):
         self.calc = calculator
         self.bands = list(bands)
@@ -440,6 +484,19 @@ class LMThicknessOptimizer:
             0.0, float(auto_min_relative_improvement)
         )
         self.min_thickness = float(min_thickness)
+        self.thickness_bounds = {
+            str(mat).lower().replace("-", "_"): (float(bounds[0]), float(bounds[1]))
+            for mat, bounds in (thickness_bounds or {}).items()
+        }
+        for mat, (lo, hi) in self.thickness_bounds.items():
+            if lo < 0.0 or hi <= lo:
+                raise ValueError(
+                    f"thickness bound for {mat!r} requires 0 <= lower < upper"
+                )
+            if self.min_thickness >= hi:
+                raise ValueError(
+                    f"min_thickness must be below the upper bound for {mat!r}"
+                )
         self.mini_batch = bool(mini_batch)
         self.batch_size = int(batch_size)
         # Default: about one full pass over the discrete study grid per epoch.
@@ -601,10 +658,17 @@ class LMThicknessOptimizer:
         r = self.residuals(layers)
         return 0.5 * sum(x * x for x in r)
 
+    def bounds_for(self, material: str) -> tuple[float, float]:
+        return _bounds_for(
+            material,
+            self.min_thickness,
+            self.thickness_bounds,
+        )
+
     def _project(self, materials: Sequence[str], x: list[float]) -> list[float]:
         out = []
         for mat, d in zip(materials, x):
-            lo, hi = _bounds_for(mat, self.min_thickness)
+            lo, hi = self.bounds_for(mat)
             out.append(min(hi, max(lo, d)))
         return out
 
@@ -622,7 +686,7 @@ class LMThicknessOptimizer:
         J = [[0.0] * n for _ in range(m)]
         for j in free:
             step = self.fd_step
-            lo, hi = _bounds_for(materials[j], self.min_thickness)
+            lo, hi = self.bounds_for(materials[j])
             xp = list(x)
             if x[j] + step <= hi:
                 xp[j] = x[j] + step
@@ -757,7 +821,7 @@ class LMThicknessOptimizer:
         g = [0.0] * n
         for j in free:
             step = self.fd_step
-            lo, hi = _bounds_for(materials[j], self.min_thickness)
+            lo, hi = self.bounds_for(materials[j])
             xp = list(x)
             if x[j] + step <= hi:
                 xp[j] = x[j] + step
@@ -875,8 +939,8 @@ class LMThicknessOptimizer:
 
         scale = 1e9
         y0 = [x0[j] * scale for j in free]
-        lo = [_bounds_for(materials[j], self.min_thickness)[0] * scale for j in free]
-        hi = [_bounds_for(materials[j], self.min_thickness)[1] * scale for j in free]
+        lo = [self.bounds_for(materials[j])[0] * scale for j in free]
+        hi = [self.bounds_for(materials[j])[1] * scale for j in free]
 
         def unpack(y: Sequence[float]) -> list[float]:
             x = list(x0)
@@ -1000,7 +1064,7 @@ class LMThicknessOptimizer:
         for i in range(n_random):
             x = list(x0)
             for j in free:
-                lo, hi = _bounds_for(materials[j], self.min_thickness)
+                lo, hi = self.bounds_for(materials[j])
                 u = (per_dim_bins[j][i] + rng.random()) / max(1, n_random)
                 x[j] = lo + u * (hi - lo)
             starts.append(x)
@@ -1128,7 +1192,7 @@ class LMThicknessOptimizer:
         free = list(range(len(x0_full))) if free_indices is None else list(free_indices)
         if not free:
             raise ValueError("global optimisation needs at least one free layer")
-        bounds = [_bounds_for(materials[j], self.min_thickness) for j in free]
+        bounds = [self.bounds_for(materials[j]) for j in free]
         x0_free = [x0_full[j] for j in free]
         start_layers = list(zip(materials, x0_full))
         start_cost = self.cost(start_layers)
@@ -1871,7 +1935,7 @@ class LMThicknessOptimizer:
                 start_cost=c0,
             )
 
-        bounds = [_bounds_for(materials[j], self.min_thickness) for j in free]
+        bounds = [self.bounds_for(materials[j]) for j in free]
         x0_free = [x[j] for j in free]
         layers0 = list(zip(materials, x))
         r = self.residuals(layers0)

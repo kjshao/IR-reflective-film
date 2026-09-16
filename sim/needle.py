@@ -11,7 +11,12 @@ import math
 from dataclasses import dataclass
 from typing import Sequence
 
-from lm_optimizer import BandSpec, LMThicknessOptimizer, OptimResult, _bounds_for
+from lm_optimizer import (
+    BandSpec,
+    LMThicknessOptimizer,
+    OptimResult,
+    parse_thickness_bounds_nm,
+)
 from rt_calculator import RTCalculator
 
 
@@ -179,7 +184,7 @@ class NeedleSynthesizer:
         best_result: OptimResult | None = None
         best_label = ""
         for sensitivity, position, material in probes[: self.deep_search_candidates]:
-            lo, _ = _bounds_for(material, self.opt.min_thickness)
+            lo, _ = self.opt.bounds_for(material)
             trial = list(layers)
             trial.insert(position, (material, lo))
             result = (
@@ -653,5 +658,10 @@ def make_optimizer_from_config(
             float(cfg["min_thickness"])
             if cfg.get("min_thickness") is not None
             else 1e-9 * float(cfg.get("min_thickness_nm", 8.0))
+        ),
+        thickness_bounds=(
+            cfg.get("thickness_bounds")
+            if cfg.get("thickness_bounds") is not None
+            else parse_thickness_bounds_nm(cfg.get("thickness_bounds_nm"))
         ),
     )

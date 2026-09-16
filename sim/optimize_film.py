@@ -64,7 +64,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tmm
 import dispersion as dsp
-from lm_optimizer import BandSpec, LMThicknessOptimizer, _bounds_for
+from lm_optimizer import (
+    BandSpec,
+    LMThicknessOptimizer,
+    _bounds_for,
+    parse_thickness_bounds_nm,
+)
 from needle import NeedleSynthesizer
 from plot_rt import (
     close_all_figures,
@@ -115,6 +120,7 @@ def random_qw_init(
     jitter: float = 0.35,
     qw_fraction: float = 0.25,
     min_thickness_m: float = 8e-9,
+    thickness_bounds: dict[str, tuple[float, float]] | None = None,
 ) -> list[tuple[str, float]]:
     """Physically reasonable random thicknesses; keep material sequence.
 
@@ -137,7 +143,7 @@ def random_qw_init(
         n = max(n, 1.01)
         scale = math.exp(rng.uniform(-j, j)) if j > 0 else 1.0
         d = frac * wl / n * scale
-        lo, hi = _bounds_for(key, min_thickness_m)
+        lo, hi = _bounds_for(key, min_thickness_m, thickness_bounds)
         out.append((key, min(hi, max(lo, d))))
     return out
 
@@ -166,6 +172,7 @@ def apply_init_layers(
     jitter = float(init_cfg.get("jitter", cfg.get("init_jitter", 0.35)))
     qw_fraction = float(init_cfg.get("qw_fraction", 0.25))
     min_nm = float(cfg.get("min_thickness_nm", 8.0))
+    thickness_bounds = parse_thickness_bounds_nm(cfg.get("thickness_bounds_nm"))
 
     if mode in ("random_qw", "qw", "random", "true", "1"):
         layers1 = random_qw_init(
@@ -175,6 +182,7 @@ def apply_init_layers(
             jitter=jitter,
             qw_fraction=qw_fraction,
             min_thickness_m=min_nm * _NM,
+            thickness_bounds=thickness_bounds,
         )
         note = (
             f"random_qw  seed={seed}  jitter={jitter:g}  "
@@ -187,7 +195,7 @@ def apply_init_layers(
         out: list[tuple[str, float]] = []
         for mat, _d0 in layers:
             key = dsp.normalize_material_name(mat)
-            lo, hi = _bounds_for(key, min_nm * _NM)
+            lo, hi = _bounds_for(key, min_nm * _NM, thickness_bounds)
             # Prefer mid-thin range: log-uniform between lo and min(hi, 200 nm).
             hi_eff = min(hi, 200e-9)
             if hi_eff <= lo:
@@ -930,6 +938,9 @@ def run(stack_path: str, cfg_path: str) -> int:
             cfg.get("auto_min_relative_improvement", 0.01)
         ),
         min_thickness=_NM * float(cfg.get("min_thickness_nm", 8.0)),
+        thickness_bounds=parse_thickness_bounds_nm(
+            cfg.get("thickness_bounds_nm")
+        ),
         mini_batch=mini_batch and method == "adam",
         batch_size=batch_size,
         n_batches=n_batches,
