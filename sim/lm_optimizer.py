@@ -1586,10 +1586,21 @@ class LMThicknessOptimizer:
         selected_starts = [train_starts[best_train]]
         selected_x = [np.asarray(train_x[best_train])]
         available = set(range(len(pool_starts)))
+        selection_progress = {"done": 1, "total": n_random}
+        selection_started = time.monotonic()
+        selection_report_every = max(1, n_random // 20)
+        if verbose:
+            print(
+                f"    surrogate selection setup: target={n_random}  "
+                f"pool={len(available)}  dimensions={len(free)}  "
+                f"diversity_weight={self.surrogate_diversity_weight:g}",
+                flush=True,
+            )
         with _progress_heartbeat(
             f"surrogate batch selection (n={n_random})",
             interval_s=self.multistart_progress_interval_s,
             enabled=verbose,
+            progress=selection_progress,
         ):
             while len(selected_starts) < n_random and available:
                 best_index = min(
@@ -1604,6 +1615,27 @@ class LMThicknessOptimizer:
                 available.remove(best_index)
                 selected_starts.append(pool_starts[best_index])
                 selected_x.append(pool_x[best_index])
+                selected_count = len(selected_starts)
+                selection_progress["done"] = selected_count
+                if verbose and (
+                    selected_count == 2
+                    or selected_count % selection_report_every == 0
+                    or selected_count == n_random
+                ):
+                    elapsed = time.monotonic() - selection_started
+                    completed_steps = max(1, selected_count - 1)
+                    total_steps = max(1, n_random - 1)
+                    completed_work = completed_steps * (completed_steps + 1) / 2
+                    total_work = total_steps * (total_steps + 1) / 2
+                    eta = elapsed * max(0.0, total_work - completed_work) / completed_work
+                    print(
+                        f"    surrogate selection progress: "
+                        f"{selected_count}/{n_random} selected  "
+                        f"pool_remaining={len(available)}  "
+                        f"last_lcb={float(lcb[best_index]):.6e}  "
+                        f"elapsed={elapsed:.1f}s  eta_est={eta:.1f}s",
+                        flush=True,
+                    )
 
         if verbose:
             print(

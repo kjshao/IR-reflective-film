@@ -240,6 +240,8 @@ class TRFTests(unittest.TestCase):
         self.assertIn("surrogate prescreen (real TMM loss): started", log)
         self.assertIn("surrogate training (10 Extra Trees): completed", log)
         self.assertIn("surrogate inference (pool=32): completed", log)
+        self.assertIn("surrogate selection setup: target=3", log)
+        self.assertIn("surrogate selection progress: 2/3 selected", log)
         self.assertIn("surrogate batch selection (n=3): completed", log)
 
     def test_invalid_json_thickness_bounds_are_rejected(self):
