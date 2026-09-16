@@ -74,6 +74,7 @@ from lm_optimizer import (
 )
 from layer_search import (
     LayerSearchConfig,
+    LayerSearchResult,
     ParetoBeamLayerSearch,
     write_layer_search_results,
 )
@@ -689,6 +690,129 @@ def write_stack_txt(
     )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
+
+
+def write_layer_search_candidate_outputs(
+    out_dir: str,
+    result: LayerSearchResult,
+    *,
+    calculator,
+    wavelengths: list[float],
+    bands: list[BandSpec],
+    incident: StackRow,
+    substrate: StackRow,
+    theta0: float,
+    polarization: str,
+    nk: dict[str, complex],
+    nk_note: str,
+    top_n: int | None = None,
+) -> list[str]:
+    """Plot and export every full-fidelity layer-search finalist."""
+    candidates = (
+        result.ranking
+        if top_n is None or top_n <= 0
+        else result.ranking[:top_n]
+    )
+    candidate_dir = os.path.join(out_dir, "layer_search_candidates")
+    os.makedirs(candidate_dir, exist_ok=True)
+    written: list[str] = []
+    curves: list[tuple[str, list[float]]] = []
+    for rank, candidate in enumerate(candidates, 1):
+        R, T = calculator.spectrum(
+            candidate.layers,
+            wavelengths,
+            theta0,
+            incident=incident.material,
+            substrate=substrate.material,
+            polarization=polarization,
+        )
+        stem = (
+            f"rank_{rank:02d}_n{len(candidate.layers):02d}_"
+            f"id{candidate.candidate_id}"
+        )
+        title = (
+            f"Layer-search rank {rank}: N={len(candidate.layers)}, "
+            f"loss={candidate.cost:.4e}, Pareto={candidate.pareto_rank}, "
+            f"feasible={candidate.feasible}"
+        )
+        plot_path = os.path.join(candidate_dir, stem + "_rt.png")
+        spectrum_path = os.path.join(candidate_dir, stem + "_spectrum.csv")
+        band_path = os.path.join(candidate_dir, stem + "_band_stats.csv")
+        stack_path = os.path.join(candidate_dir, stem + "_stack.txt")
+        plot_rt(
+            plot_path,
+            wavelengths,
+            R,
+            T,
+            bands=bands,
+            title=title,
+            layers=candidate.layers,
+        )
+        write_spectrum_csv(spectrum_path, wavelengths, R, T)
+        write_band_stats_csv(band_path, wavelengths, R, T, bands)
+        write_stack_txt(
+            stack_path,
+            incident,
+            candidate.layers,
+            substrate,
+            nk,
+            film_indices=None,
+            header_lines=[
+                f"# layer-search rank={rank}  "
+                f"candidate_id={candidate.candidate_id}  "
+                f"layers={len(candidate.layers)}  "
+                f"loss={candidate.cost:.12e}  "
+                f"pareto_rank={candidate.pareto_rank}  "
+                f"feasible={candidate.feasible}",
+                nk_note,
+            ],
+        )
+        curves.append((f"#{rank} N={len(candidate.layers)}", R))
+        written.extend([plot_path, spectrum_path, band_path, stack_path])
+
+    if curves:
+        configure_matplotlib()
+        import matplotlib.pyplot as plt  # type: ignore[import-not-found]
+
+        fig, ax = plt.subplots(figsize=(11, 6.5))
+        wavelength_nm = [value / _NM for value in wavelengths]
+        for label, reflectance in curves:
+            ax.plot(
+                wavelength_nm,
+                [100.0 * value for value in reflectance],
+                linewidth=1.5,
+                label=label,
+            )
+        for band in bands:
+            ax.axvspan(
+                band.wl_lo / _NM,
+                band.wl_hi / _NM,
+                alpha=0.055,
+                color="#6f7f96",
+            )
+            if band.R_target is not None:
+                ax.hlines(
+                    100.0 * band.R_target,
+                    band.wl_lo / _NM,
+                    band.wl_hi / _NM,
+                    colors="#555555",
+                    linestyles=":",
+                    linewidth=1.0,
+                )
+        ax.set(
+            xlabel="Wavelength (nm)",
+            ylabel="Reflectance (%)",
+            title="Full-fidelity variable-layer candidates",
+            ylim=(0.0, 100.0),
+        )
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", ncol=2)
+        fig.tight_layout()
+        overlay_path = os.path.join(out_dir, "layer_search_candidates_rt.png")
+        fig.savefig(overlay_path, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        written.append(overlay_path)
+    return written
 
 
 def make_txt_best_checkpoint_saver(
@@ -1307,6 +1431,32 @@ def run(stack_path: str, cfg_path: str) -> int:
         )
         print(f"  wrote {ranking_csv}")
         print(f"  wrote {ranking_json}")
+        if bool(cfg.get("layer_search_plot_candidates", True)):
+            raw_plot_top_n = cfg.get("layer_search_plot_top_n")
+            plot_top_n = (
+                int(raw_plot_top_n)
+                if raw_plot_top_n is not None
+                else None
+            )
+            candidate_outputs = write_layer_search_candidate_outputs(
+                out_dir,
+                layer_search_result,
+                calculator=calc,
+                wavelengths=plot_wls,
+                bands=plot_bands,
+                incident=incident,
+                substrate=substrate,
+                theta0=theta0,
+                polarization=pol,
+                nk=nk,
+                nk_note=nk_note,
+                top_n=plot_top_n,
+            )
+            print(
+                f"  wrote {len(candidate_outputs)} layer-search candidate "
+                f"files under "
+                f"{os.path.join(out_dir, 'layer_search_candidates')}"
+            )
     elif use_needle:
         synthesizer = NeedleSynthesizer(
             opt,

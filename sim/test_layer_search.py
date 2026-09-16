@@ -259,6 +259,26 @@ class LayerSearchTests(unittest.TestCase):
             self.assertTrue(
                 os.path.isfile(os.path.join(output_dir, "stack_best.txt"))
             )
+            candidate_dir = os.path.join(
+                output_dir, "layer_search_candidates"
+            )
+            candidate_files = os.listdir(candidate_dir)
+            self.assertTrue(
+                any(name.endswith("_spectrum.csv") for name in candidate_files)
+            )
+            self.assertTrue(
+                any(name.endswith("_band_stats.csv") for name in candidate_files)
+            )
+            self.assertTrue(
+                any(name.endswith("_stack.txt") for name in candidate_files)
+            )
+            self.assertTrue(
+                os.path.isfile(
+                    os.path.join(
+                        output_dir, "layer_search_candidates_rt.png"
+                    )
+                )
+            )
 
 
 if __name__ == "__main__":

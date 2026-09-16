@@ -103,6 +103,8 @@
   "polarization": "unpolarized",
   "checkpoint_on_best": true,
   "checkpoint_plot_rt": true,
+  "layer_search_plot_candidates": true,
+  "layer_search_plot_top_n": 0,
   "plot_wavelength_nm": [400, 1800],
   "plot_step_nm": 5,
   "output_dir": "../out/variable_layer_pareto_beam"

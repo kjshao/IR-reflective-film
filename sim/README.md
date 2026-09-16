@@ -284,7 +284,12 @@ sim/.venv/bin/python sim/optimize_film.py \
 
 - `layer_search_ranking.csv`：最终完整网格候选排名
 - `layer_search_ranking.json`：拓扑、各层厚度、各波段误差和来源操作
+- `layer_search_candidates/`：每个完整精修候选各自的 R/T 图、光谱 CSV、波段统计和膜系
+- `layer_search_candidates_rt.png`：所有完整精修候选的反射率叠加对比图
 - `stack_best.txt`：排名第一的可变层数膜系
+
+默认绘制全部 `final_top_k` 候选。可用 `layer_search_plot_top_n` 限制绘图
+数量（`0` 表示全部），或设置 `layer_search_plot_candidates: false` 关闭。
 
 `beam_width` 和 `offspring_per_parent` 控制拓扑覆盖范围；
 `coarse_optical_starts + coarse_sobol_starts` 控制每个拓扑的粗筛成本；
