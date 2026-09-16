@@ -18,6 +18,7 @@
   "surrogate_exploration_beta": 1.0,
   "surrogate_pool_n": 10000,
   "surrogate_diversity_weight": 0.1,
+  "surrogate_selection_gpu_min_work": 10000000,
   "multistart_final_polish_method": "trf",
   "auto_de_fallback": true,
   "auto_min_relative_improvement": 0.01,

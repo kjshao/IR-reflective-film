@@ -546,6 +546,7 @@ class LMThicknessOptimizer:
         surrogate_exploration_beta: float = 1.0,
         surrogate_pool_n: int = 10000,
         surrogate_diversity_weight: float = 0.1,
+        surrogate_selection_gpu_min_work: int = 10_000_000,
         multistart_final_polish_method: str | None = None,
         multistart_gpu_ids: Sequence[int] | None = None,
         multistart_progress_interval_s: float = 10.0,
@@ -579,6 +580,7 @@ class LMThicknessOptimizer:
         min_thickness: float = 8e-9,
         # Hard upper bound for the sum of all layer thicknesses.
         max_total_thickness: float | None = None,
+        use_cuda: bool = False,
         # Optional per-material (lo, hi) bounds in metres. JSON configs use
         # ``thickness_bounds_nm`` and are converted before construction.
         thickness_bounds: dict[str, tuple[float, float]] | None = None,
@@ -639,6 +641,9 @@ class LMThicknessOptimizer:
         self.surrogate_diversity_weight = max(
             0.0, float(surrogate_diversity_weight)
         )
+        self.surrogate_selection_gpu_min_work = max(
+            0, int(surrogate_selection_gpu_min_work)
+        )
         self.multistart_final_polish_method = resolve_global_polish_method(
             multistart_final_polish_method
         )
@@ -662,6 +667,7 @@ class LMThicknessOptimizer:
             0.0, float(auto_min_relative_improvement)
         )
         self.min_thickness = float(min_thickness)
+        self.use_cuda = bool(use_cuda)
         self.max_total_thickness = (
             None
             if max_total_thickness is None
@@ -1461,6 +1467,95 @@ class LMThicknessOptimizer:
             starts.append(self._unit_to_multistart(unit, materials, x0, free))
         return starts
 
+    def _select_surrogate_pool_indices(
+        self,
+        pool_x,
+        normalized_score,
+        initial_x,
+        target_count: int,
+        raw_lcb,
+        *,
+        verbose: bool,
+    ) -> list[int]:
+        """Greedy LCB/diversity selection with incremental nearest distances."""
+        import numpy as np
+
+        n_pool, n_dim = pool_x.shape
+        work = int(n_pool) * max(1, int(target_count)) * max(1, int(n_dim))
+        use_gpu = self.use_cuda and work >= self.surrogate_selection_gpu_min_work
+        if use_gpu:
+            import cupy as xp
+
+            if self.multistart_gpu_ids:
+                xp.cuda.Device(self.multistart_gpu_ids[0]).use()
+            backend = f"GPU {int(xp.cuda.runtime.getDevice())} (CuPy float64)"
+        else:
+            xp = np
+            backend = "CPU (NumPy float64)"
+
+        pool_backend = xp.asarray(pool_x, dtype=xp.float64)
+        score_backend = xp.asarray(normalized_score, dtype=xp.float64)
+        initial_backend = xp.asarray(initial_x, dtype=xp.float64)
+        min_distance = xp.sqrt(
+            xp.mean((pool_backend - initial_backend) ** 2, axis=1)
+        )
+        selected_mask = xp.zeros(n_pool, dtype=xp.bool_)
+        selected_indices: list[int] = []
+        selection_progress = {"done": 1, "total": target_count}
+        selection_started = time.monotonic()
+        selection_report_every = max(1, target_count // 20)
+        if verbose:
+            print(
+                f"    surrogate selection setup: target={target_count}  "
+                f"pool={n_pool}  dimensions={n_dim}  "
+                f"diversity_weight={self.surrogate_diversity_weight:g}  "
+                f"backend={backend}  work={work}",
+                flush=True,
+            )
+        with _progress_heartbeat(
+            f"surrogate batch selection (n={target_count})",
+            interval_s=self.multistart_progress_interval_s,
+            enabled=verbose,
+            progress=selection_progress,
+        ):
+            while len(selected_indices) + 1 < target_count:
+                acquisition = (
+                    score_backend
+                    - self.surrogate_diversity_weight * min_distance
+                )
+                acquisition[selected_mask] = xp.inf
+                best_index = int(xp.argmin(acquisition).item())
+                selected_indices.append(best_index)
+                selected_mask[best_index] = True
+                distance = xp.sqrt(
+                    xp.mean(
+                        (pool_backend - pool_backend[best_index]) ** 2,
+                        axis=1,
+                    )
+                )
+                min_distance = xp.minimum(min_distance, distance)
+
+                selected_count = len(selected_indices) + 1
+                selection_progress["done"] = selected_count
+                if verbose and (
+                    selected_count == 2
+                    or selected_count % selection_report_every == 0
+                    or selected_count == target_count
+                ):
+                    elapsed = time.monotonic() - selection_started
+                    completed_steps = max(1, selected_count - 1)
+                    remaining_steps = max(0, target_count - selected_count)
+                    eta = elapsed * remaining_steps / completed_steps
+                    print(
+                        f"    surrogate selection progress: "
+                        f"{selected_count}/{target_count} selected  "
+                        f"pool_remaining={n_pool - len(selected_indices)}  "
+                        f"last_lcb={float(raw_lcb[best_index]):.6e}  "
+                        f"elapsed={elapsed:.1f}s  eta_est={eta:.1f}s",
+                        flush=True,
+                    )
+        return selected_indices
+
     def _extra_trees_multistart_starts(
         self,
         materials: Sequence[str],
@@ -1584,58 +1679,15 @@ class LMThicknessOptimizer:
 
         best_train = min(range(candidate_n), key=lambda i: train_y[i])
         selected_starts = [train_starts[best_train]]
-        selected_x = [np.asarray(train_x[best_train])]
-        available = set(range(len(pool_starts)))
-        selection_progress = {"done": 1, "total": n_random}
-        selection_started = time.monotonic()
-        selection_report_every = max(1, n_random // 20)
-        if verbose:
-            print(
-                f"    surrogate selection setup: target={n_random}  "
-                f"pool={len(available)}  dimensions={len(free)}  "
-                f"diversity_weight={self.surrogate_diversity_weight:g}",
-                flush=True,
-            )
-        with _progress_heartbeat(
-            f"surrogate batch selection (n={n_random})",
-            interval_s=self.multistart_progress_interval_s,
-            enabled=verbose,
-            progress=selection_progress,
-        ):
-            while len(selected_starts) < n_random and available:
-                best_index = min(
-                    available,
-                    key=lambda i: float(normalized_score[i])
-                    - self.surrogate_diversity_weight
-                    * min(
-                        float(np.sqrt(np.mean((pool_x[i] - chosen) ** 2)))
-                        for chosen in selected_x
-                    ),
-                )
-                available.remove(best_index)
-                selected_starts.append(pool_starts[best_index])
-                selected_x.append(pool_x[best_index])
-                selected_count = len(selected_starts)
-                selection_progress["done"] = selected_count
-                if verbose and (
-                    selected_count == 2
-                    or selected_count % selection_report_every == 0
-                    or selected_count == n_random
-                ):
-                    elapsed = time.monotonic() - selection_started
-                    completed_steps = max(1, selected_count - 1)
-                    total_steps = max(1, n_random - 1)
-                    completed_work = completed_steps * (completed_steps + 1) / 2
-                    total_work = total_steps * (total_steps + 1) / 2
-                    eta = elapsed * max(0.0, total_work - completed_work) / completed_work
-                    print(
-                        f"    surrogate selection progress: "
-                        f"{selected_count}/{n_random} selected  "
-                        f"pool_remaining={len(available)}  "
-                        f"last_lcb={float(lcb[best_index]):.6e}  "
-                        f"elapsed={elapsed:.1f}s  eta_est={eta:.1f}s",
-                        flush=True,
-                    )
+        selected_indices = self._select_surrogate_pool_indices(
+            pool_x,
+            normalized_score,
+            np.asarray(train_x[best_train]),
+            n_random,
+            lcb,
+            verbose=verbose,
+        )
+        selected_starts.extend(pool_starts[i] for i in selected_indices)
 
         if verbose:
             print(

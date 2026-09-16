@@ -119,6 +119,7 @@ sim/
 - **`multistart_sampler`**：`lhs`（默认）/ `sobol` / `extra_trees`；`extra_trees` 先进行 Sobol 候选预筛选，再用代理模型选择低预测 loss、高不确定度且彼此分散的起点
 - **`multistart_candidate_n`** / **`surrogate_pool_n`**：Extra Trees 的真实 loss 预筛选数量（默认 256）和代理候选池数量（默认 10000）
 - **`surrogate_trees`** / **`surrogate_exploration_beta`** / **`surrogate_diversity_weight`**：树数量、LCB 探索强度和起点距离多样性权重
+- **`surrogate_selection_gpu_min_work`**：Selection 的 `候选数 × 起点数 × 自由层数` 达到该阈值且 `use_cuda=true` 时使用 CuPy float64；默认 `10000000`
 - **`multistart_final_polish_method`**：对多起点最优结果进行最终精修；推荐 `trf`
 - **`gpu_ids`**：例如 `[0, 1, 2, 3]`；指定 CUDA 设备，要求 `use_cuda: true`；省略时自动使用所有可见 GPU（旧键 `multistart_gpu_ids` 仍兼容）
 - **`multistart_progress_interval_s`**：Surrogate 各阶段及多 GPU 任务的进度心跳间隔，默认 `10` 秒
@@ -165,6 +166,7 @@ Multistart + mini-batch Adam：
   "surrogate_exploration_beta": 1.0,
   "surrogate_pool_n": 10000,
   "surrogate_diversity_weight": 0.1,
+  "surrogate_selection_gpu_min_work": 10000000,
   "multistart_final_polish_method": "trf",
   "adam_lr_nm": 2.0,
   "mini_batch": {

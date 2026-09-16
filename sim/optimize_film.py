@@ -979,6 +979,9 @@ def run(stack_path: str, cfg_path: str) -> int:
         surrogate_diversity_weight=float(
             cfg.get("surrogate_diversity_weight", 0.1)
         ),
+        surrogate_selection_gpu_min_work=int(
+            cfg.get("surrogate_selection_gpu_min_work", 10_000_000)
+        ),
         multistart_final_polish_method=cfg.get(
             "multistart_final_polish_method"
         ),
@@ -999,6 +1002,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             if cfg.get("max_total_thickness_nm") is not None
             else None
         ),
+        use_cuda=use_cuda,
         thickness_bounds=parse_thickness_bounds_nm(
             cfg.get("thickness_bounds_nm")
         ),

@@ -244,6 +244,53 @@ class TRFTests(unittest.TestCase):
         self.assertIn("surrogate selection progress: 2/3 selected", log)
         self.assertIn("surrogate batch selection (n=3): completed", log)
 
+    def test_incremental_surrogate_selection_matches_brute_force(self):
+        import numpy as np
+
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.4)],
+            surrogate_diversity_weight=0.2,
+        )
+        pool = np.asarray(
+            [
+                [0.1, 0.2],
+                [0.8, 0.7],
+                [0.4, 0.9],
+                [0.6, 0.1],
+                [0.3, 0.5],
+            ],
+            dtype=np.float64,
+        )
+        score = np.asarray([0.4, 0.1, 0.3, 0.2, 0.35])
+        initial = np.asarray([0.2, 0.2])
+        available = set(range(len(pool)))
+        selected_x = [initial]
+        expected = []
+        while len(expected) + 1 < 4:
+            index = min(
+                available,
+                key=lambda i: float(score[i])
+                - 0.2
+                * min(
+                    float(np.sqrt(np.mean((pool[i] - chosen) ** 2)))
+                    for chosen in selected_x
+                ),
+            )
+            available.remove(index)
+            expected.append(index)
+            selected_x.append(pool[index])
+
+        actual = optimizer._select_surrogate_pool_indices(
+            pool,
+            score,
+            initial,
+            4,
+            score,
+            verbose=False,
+        )
+        self.assertEqual(actual, expected)
+
     def test_invalid_json_thickness_bounds_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "min_nm < max_nm"):
             parse_thickness_bounds_nm({"tio2": [200, 100]})

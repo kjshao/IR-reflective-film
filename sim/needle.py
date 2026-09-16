@@ -645,6 +645,9 @@ def make_optimizer_from_config(
         surrogate_diversity_weight=float(
             cfg.get("surrogate_diversity_weight", 0.1)
         ),
+        surrogate_selection_gpu_min_work=int(
+            cfg.get("surrogate_selection_gpu_min_work", 10_000_000)
+        ),
         multistart_final_polish_method=cfg.get(
             "multistart_final_polish_method"
         ),
@@ -692,6 +695,7 @@ def make_optimizer_from_config(
                 else None
             )
         ),
+        use_cuda=bool(cfg.get("use_cuda", False)),
         thickness_bounds=(
             cfg.get("thickness_bounds")
             if cfg.get("thickness_bounds") is not None

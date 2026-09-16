@@ -719,6 +719,7 @@ python3 sim/optimize_film.py \
 | `multistart_sampler` | `lhs` / `sobol` / `extra_trees` | 多起点生成或代理引导方式 |
 | `multistart_candidate_n` | 256 | Extra Trees 训练前计算真实 loss 的 Sobol 候选数 |
 | `surrogate_pool_n` | 10000 | 代理模型用于挑选起点的候选池大小 |
+| `surrogate_selection_gpu_min_work` | $10^7$ | Selection 增量距离工作量达到阈值时启用 CuPy float64 |
 | `multistart_sampling_bounds_nm` | 按设计设定 | 限制 LHS/Sobol/Extra Trees 候选采样；局部优化仍使用厚度硬边界 |
 | `gpu_ids` | 所有可见 GPU | 多 GPU 并行 Surrogate 真实 loss、有限差分和 Multistart；省略时自动检测 |
 | `auto_min_relative_improvement` | 0.01 | 触发 DE 回退的最小相对改善 |
