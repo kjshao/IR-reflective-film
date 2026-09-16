@@ -1427,10 +1427,55 @@ class LMThicknessOptimizer:
         free: Sequence[int],
     ) -> list[float]:
         x = list(x0)
-        for value, j in zip(unit, free):
-            lo, hi = self.multistart_bounds_for(materials[j])
-            x[j] = lo + float(value) * (hi - lo)
+        if self.max_total_thickness is None:
+            for value, j in zip(unit, free):
+                lo, hi = self.multistart_bounds_for(materials[j])
+                x[j] = lo + float(value) * (hi - lo)
+            return self._project(materials, x, free)
+
+        free_set = set(free)
+        fixed_total = sum(x[i] for i in range(len(x)) if i not in free_set)
+        available = self.max_total_thickness - fixed_total
+        sample_bounds = {
+            j: self.multistart_bounds_for(materials[j]) for j in free
+        }
+        minimum = sum(sample_bounds[j][0] for j in free)
+        if available < minimum - 1e-15:
+            raise ValueError(
+                "max_total_thickness is infeasible for multistart sampling: "
+                f"fixed layers plus sampling lower bounds need at least "
+                f"{(fixed_total + minimum) * 1e9:.3f} nm, got "
+                f"{self.max_total_thickness * 1e9:.3f} nm"
+            )
+
+        # Use a second QMC/LHS coordinate per layer to randomise the
+        # stick-breaking order. This samples inside the box/capped-simplex
+        # intersection directly, instead of projecting many independent box
+        # samples onto (and therefore crowding) the total-thickness boundary.
+        n_free = len(free)
+        values = [float(unit[i]) for i in range(n_free)]
+        if len(unit) >= 2 * n_free:
+            priorities = [float(unit[n_free + i]) for i in range(n_free)]
+            order = sorted(range(n_free), key=lambda i: priorities[i])
+        else:
+            order = list(range(n_free))
+
+        remaining = available
+        remaining_min = minimum
+        for position in order:
+            j = free[position]
+            lo, hi = sample_bounds[j]
+            remaining_min -= lo
+            feasible_hi = min(hi, remaining - remaining_min)
+            if feasible_hi < lo:
+                feasible_hi = lo
+            x[j] = lo + values[position] * (feasible_hi - lo)
+            remaining -= x[j]
         return self._project(materials, x, free)
+
+    def _multistart_unit_dimensions(self, n_free: int) -> int:
+        """Unit-cube dimensions needed by the active start-point mapping."""
+        return 2 * n_free if self.max_total_thickness is not None else n_free
 
     def _normalise_multistart(
         self,
@@ -1453,16 +1498,17 @@ class LMThicknessOptimizer:
     ) -> list[list[float]]:
         rng = random.Random(self.multistart_seed)
         bins = list(range(n_random))
-        per_dim_bins: dict[int, list[int]] = {}
-        for j in free:
+        n_dim = self._multistart_unit_dimensions(len(free))
+        per_dim_bins: list[list[int]] = []
+        for _ in range(n_dim):
             shuffled = list(bins)
             rng.shuffle(shuffled)
-            per_dim_bins[j] = shuffled
+            per_dim_bins.append(shuffled)
         starts = []
         for i in range(n_random):
             unit = [
                 (per_dim_bins[j][i] + rng.random()) / max(1, n_random)
-                for j in free
+                for j in range(n_dim)
             ]
             starts.append(self._unit_to_multistart(unit, materials, x0, free))
         return starts
@@ -1577,7 +1623,7 @@ class LMThicknessOptimizer:
         candidate_n = max(n_random, self.multistart_candidate_n)
         train_unit = self._sobol_unit_points(
             candidate_n,
-            len(free),
+            self._multistart_unit_dimensions(len(free)),
             self.multistart_seed,
         )
         train_starts = [
@@ -1646,7 +1692,7 @@ class LMThicknessOptimizer:
         ):
             pool_unit = self._sobol_unit_points(
                 self.surrogate_pool_n,
-                len(free),
+                self._multistart_unit_dimensions(len(free)),
                 pool_seed,
             )
             pool_starts = [
@@ -1717,7 +1763,7 @@ class LMThicknessOptimizer:
         elif self.multistart_sampler == "sobol":
             units = self._sobol_unit_points(
                 n_random,
-                len(free),
+                self._multistart_unit_dimensions(len(free)),
                 self.multistart_seed,
             )
             random_starts = [

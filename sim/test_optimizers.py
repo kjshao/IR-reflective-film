@@ -212,6 +212,64 @@ class TRFTests(unittest.TestCase):
             self.assertGreaterEqual(start[0], 100e-9)
             self.assertLessEqual(start[0], 150e-9)
 
+    def test_multistart_samples_directly_inside_total_thickness_cap(self):
+        for sampler in ("lhs", "sobol"):
+            with self.subTest(sampler=sampler):
+                optimizer = LMThicknessOptimizer(
+                    LinearReflectanceCalculator(),
+                    [BandSpec(500e-9, 600e-9, R_target=0.4)],
+                    method="multistart",
+                    multistart_n=32,
+                    multistart_seed=7,
+                    multistart_sampler=sampler,
+                    thickness_bounds=parse_thickness_bounds_nm(
+                        {"x": [10, 200]}
+                    ),
+                    max_total_thickness=250e-9,
+                )
+                starts = optimizer._generate_multistart_starts(
+                    ["x", "x", "x"],
+                    [50e-9, 50e-9, 50e-9],
+                    [0, 1, 2],
+                    verbose=False,
+                )
+                random_starts = starts[1:]
+                self.assertTrue(
+                    all(sum(start) <= 250e-9 + 1e-15 for start in random_starts)
+                )
+                self.assertTrue(
+                    all(
+                        10e-9 - 1e-15 <= d <= 200e-9 + 1e-15
+                        for start in random_starts
+                        for d in start
+                    )
+                )
+                # Direct feasible sampling should not collapse all infeasible
+                # box draws onto the total-thickness boundary.
+                self.assertTrue(
+                    any(sum(start) < 240e-9 for start in random_starts)
+                )
+
+    def test_total_cap_sampling_counts_fixed_layer_thickness(self):
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.4)],
+            method="multistart",
+            multistart_n=16,
+            multistart_seed=3,
+            multistart_sampler="sobol",
+            thickness_bounds=parse_thickness_bounds_nm({"x": [10, 200]}),
+            max_total_thickness=260e-9,
+        )
+        starts = optimizer._generate_multistart_starts(
+            ["x", "x", "x"],
+            [100e-9, 50e-9, 50e-9],
+            [1, 2],
+            verbose=False,
+        )
+        self.assertTrue(all(sum(start) <= 260e-9 + 1e-15 for start in starts))
+        self.assertTrue(all(abs(start[0] - 100e-9) <= 1e-15 for start in starts))
+
     def test_extra_trees_sampler_selects_requested_start_count(self):
         optimizer = LMThicknessOptimizer(
             LinearReflectanceCalculator(),
@@ -228,14 +286,16 @@ class TRFTests(unittest.TestCase):
             multistart_sampling_bounds=parse_multistart_sampling_bounds_nm(
                 {"x": [100, 300]}
             ),
+            max_total_thickness=350e-9,
         )
         output = io.StringIO()
         with redirect_stdout(output):
             starts = optimizer._generate_multistart_starts(
-                ["x"], [120e-9], [0], verbose=True
+                ["x", "x"], [120e-9, 120e-9], [0, 1], verbose=True
             )
         self.assertEqual(len(starts), 4)
-        self.assertEqual(starts[0], [120e-9])
+        self.assertEqual(starts[0], [120e-9, 120e-9])
+        self.assertTrue(all(sum(start) <= 350e-9 + 1e-15 for start in starts))
         log = output.getvalue()
         self.assertIn("surrogate prescreen (real TMM loss): started", log)
         self.assertIn("surrogate training (10 Extra Trees): completed", log)
