@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate an alternating stack and optimize it with multi-start search."""
+"""Generate an alternating stack and optimize it with multi-start or auto."""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ def prepare_inputs(
     config_path: str,
     output_override: str | None = None,
     mode_override: str | None = None,
+    method_override: str | None = None,
 ) -> tuple[str, str]:
     """Write the generated stack and effective optimization configuration."""
     config_path = os.path.abspath(config_path)
@@ -43,6 +44,11 @@ def prepare_inputs(
         config: dict[str, Any] = json.load(fh)
     if n_layers < 1:
         raise ValueError("layers must be >= 1")
+    method = str(method_override or config.get("method", "multistart")).lower()
+    if method not in ("multistart", "auto"):
+        raise ValueError(
+            "generated-stack runner supports method 'multistart' or 'auto'"
+        )
 
     stack_cfg = config.get("stack_init", {})
     if not isinstance(stack_cfg, dict):
@@ -102,7 +108,7 @@ def prepare_inputs(
         substrate=substrate,
     )
 
-    config["method"] = "multistart"
+    config["method"] = method
     config["output_dir"] = output_dir
     config["generated_stack"] = {
         "layers": n_layers,
@@ -119,7 +125,7 @@ def prepare_inputs(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Generate an H/L stack and run multi-start thickness optimization."
+        description="Generate an H/L stack and run multi-start or auto optimization."
     )
     parser.add_argument(
         "--layers", "-n", type=int, required=True, help="number of coating layers"
@@ -133,6 +139,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output-dir", "-o", default=None, help="override configuration output_dir"
     )
+    parser.add_argument(
+        "--method",
+        choices=("multistart", "auto"),
+        default=None,
+        help="override configuration method",
+    )
     args = parser.parse_args(argv)
 
     stack_path, effective_config = prepare_inputs(
@@ -140,8 +152,9 @@ def main(argv: list[str] | None = None) -> int:
         config_path=args.config,
         output_override=args.output_dir,
         mode_override=args.mode,
+        method_override=args.method,
     )
-    print("Generated multi-start optimization inputs")
+    print("Generated-stack optimization inputs")
     print(f"  stack:  {stack_path}")
     print(f"  config: {effective_config}")
     return run(stack_path, effective_config)

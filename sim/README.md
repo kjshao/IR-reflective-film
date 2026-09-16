@@ -121,7 +121,7 @@ sim/
 ## 指定层数并自动生成膜系
 
 `multistart_optimize.py` 根据层数生成交替 H/L 四分之一波长初始膜系，
-然后强制使用 `method=multistart` 优化厚度：
+然后使用配置中的 `method=multistart|auto` 优化厚度：
 
 ```bash
 sim/.venv/bin/python sim/multistart_optimize.py \
@@ -130,6 +130,15 @@ sim/.venv/bin/python sim/multistart_optimize.py \
 ```
 
 可用 `--mode hlh|lhl` 覆盖首层材料顺序，或用 `--output-dir` 覆盖输出目录。
+`--method auto` 可覆盖配置并启用“多起点局部优化 → 必要时 DE 回退”：
+
+```bash
+sim/.venv/bin/python sim/multistart_optimize.py \
+  --layers 8 \
+  --config sim/examples/example_multistart_optimize.json \
+  --method auto
+```
+
 配置中的 `stack_init.design_wavelength_nm` 决定初始四分之一波长厚度；
 也可直接设置 `high_thickness_nm`、`low_thickness_nm`。生成的 stack 和最终生效配置保存在输出目录的 `_inputs/` 中。
 

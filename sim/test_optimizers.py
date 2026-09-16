@@ -155,6 +155,15 @@ class GeneratedStackTests(unittest.TestCase):
             self.assertEqual(effective["method"], "multistart")
             self.assertEqual(effective["generated_stack"]["layers"], 7)
 
+            _, auto_config_path = prepare_inputs(
+                n_layers=7,
+                config_path=config_path,
+                method_override="auto",
+            )
+            with open(auto_config_path, encoding="utf-8") as fh:
+                auto_config = json.load(fh)
+            self.assertEqual(auto_config["method"], "auto")
+
 
 if __name__ == "__main__":
     unittest.main()

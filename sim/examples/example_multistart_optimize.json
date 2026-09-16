@@ -12,6 +12,12 @@
   "multistart_method": "trf",
   "multistart_n": 8,
   "multistart_seed": 0,
+  "auto_de_fallback": true,
+  "auto_min_relative_improvement": 0.01,
+  "de_popsize": 12,
+  "de_mutation": [0.5, 1.0],
+  "de_recombination": 0.7,
+  "global_seed": 0,
   "bands": [
     {
       "wavelength_nm": [420, 700],
