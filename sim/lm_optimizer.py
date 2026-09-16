@@ -3,11 +3,42 @@
 from __future__ import annotations
 
 import math
+import multiprocessing
 import random
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from rt_calculator import RTCalculator
+
+
+_MULTISTART_WORKER_OPTIMIZER = None
+_MULTISTART_WORKER_FREE: list[int] | None = None
+
+
+def _init_multistart_gpu_worker(optimizer, free, device_queue) -> None:
+    """Bind one spawned worker process to one CUDA device."""
+    import cupy as cp
+
+    device_id = int(device_queue.get())
+    cp.cuda.Device(device_id).use()
+    global _MULTISTART_WORKER_OPTIMIZER, _MULTISTART_WORKER_FREE
+    _MULTISTART_WORKER_OPTIMIZER = optimizer
+    _MULTISTART_WORKER_FREE = list(free)
+
+
+def _run_multistart_gpu_worker(job):
+    """Run one local start using the optimizer owned by this GPU worker."""
+    index, materials, start = job
+    optimizer = _MULTISTART_WORKER_OPTIMIZER
+    if optimizer is None:
+        raise RuntimeError("multi-start GPU worker was not initialized")
+    result = optimizer.optimize(
+        list(zip(materials, start)),
+        free_indices=_MULTISTART_WORKER_FREE,
+        verbose=False,
+    )
+    return index, result
 
 # Default physical bounds for dielectric layers (metres).
 DEFAULT_BOUNDS = {
@@ -416,6 +447,7 @@ class LMThicknessOptimizer:
         multistart_n: int = 8,
         multistart_method: str = "trf",
         multistart_seed: int | None = 0,
+        multistart_gpu_ids: Sequence[int] | None = None,
         auto_de_fallback: bool = True,
         auto_min_relative_improvement: float = 0.01,
         # Mini-batch Adam (wavelength subsets). Off by default → full-grid Adam.
@@ -479,6 +511,18 @@ class LMThicknessOptimizer:
         self.multistart_n = max(1, int(multistart_n))
         self.multistart_method = str(multistart_method).lower().strip()
         self.multistart_seed = multistart_seed
+        if multistart_gpu_ids is not None and any(
+            isinstance(device, bool) or not isinstance(device, int)
+            for device in multistart_gpu_ids
+        ):
+            raise ValueError("multistart_gpu_ids must contain integer GPU IDs")
+        self.multistart_gpu_ids = (
+            [] if multistart_gpu_ids is None else list(multistart_gpu_ids)
+        )
+        if any(device < 0 for device in self.multistart_gpu_ids):
+            raise ValueError("multistart_gpu_ids must contain non-negative integers")
+        if len(set(self.multistart_gpu_ids)) != len(self.multistart_gpu_ids):
+            raise ValueError("multistart_gpu_ids must not contain duplicates")
         self.auto_de_fallback = bool(auto_de_fallback)
         self.auto_min_relative_improvement = max(
             0.0, float(auto_min_relative_improvement)
@@ -1074,20 +1118,48 @@ class LMThicknessOptimizer:
         self.on_best = None
         results: list[OptimResult] = []
         try:
-            for i, start in enumerate(starts, 1):
-                self.method = local
+            self.method = local
+            if self.multistart_gpu_ids:
+                worker_count = min(len(starts), len(self.multistart_gpu_ids))
+                gpu_ids = self.multistart_gpu_ids[:worker_count]
                 if verbose:
                     print(
-                        f"    multistart {i}/{len(starts)}: local={local}",
+                        f"    multistart parallel: starts={len(starts)}  "
+                        f"gpus={gpu_ids}  local={local}",
                         flush=True,
                     )
-                results.append(
-                    self.optimize(
-                        list(zip(materials, start)),
-                        free_indices=free,
-                        verbose=False,
+                ctx = multiprocessing.get_context("spawn")
+                device_queue = ctx.Queue()
+                for device_id in gpu_ids:
+                    device_queue.put(device_id)
+                jobs = [
+                    (i, materials, start)
+                    for i, start in enumerate(starts)
+                ]
+                with ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    mp_context=ctx,
+                    initializer=_init_multistart_gpu_worker,
+                    initargs=(self, free, device_queue),
+                ) as executor:
+                    indexed = list(executor.map(_run_multistart_gpu_worker, jobs))
+                indexed.sort(key=lambda item: item[0])
+                results = [result for _, result in indexed]
+                device_queue.close()
+            else:
+                for i, start in enumerate(starts, 1):
+                    if verbose:
+                        print(
+                            f"    multistart {i}/{len(starts)}: local={local}",
+                            flush=True,
+                        )
+                    results.append(
+                        self.optimize(
+                            list(zip(materials, start)),
+                            free_indices=free,
+                            verbose=False,
+                        )
                     )
-                )
         finally:
             self.method = original_method
             self.on_best = original_callback

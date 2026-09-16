@@ -94,6 +94,14 @@ class TRFTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "min_nm < max_nm"):
             parse_thickness_bounds_nm({"tio2": [200, 100]})
 
+    def test_duplicate_multistart_gpu_ids_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+            LMThicknessOptimizer(
+                LinearReflectanceCalculator(),
+                [BandSpec(500e-9, 600e-9, R_target=0.4)],
+                multistart_gpu_ids=[0, 0],
+            )
+
     def test_trf_finds_bounded_target_thickness(self):
         optimizer = LMThicknessOptimizer(
             LinearReflectanceCalculator(),

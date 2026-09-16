@@ -872,6 +872,32 @@ def run(stack_path: str, cfg_path: str) -> int:
         )
 
     use_cuda = bool(cfg.get("use_cuda", False))
+    raw_gpu_ids = cfg.get("multistart_gpu_ids")
+    if raw_gpu_ids is None:
+        multistart_gpu_ids: list[int] = []
+    else:
+        if not isinstance(raw_gpu_ids, list) or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in raw_gpu_ids
+        ):
+            raise ValueError("multistart_gpu_ids must be a JSON array of GPU IDs")
+        multistart_gpu_ids = list(raw_gpu_ids)
+    if multistart_gpu_ids and not use_cuda:
+        raise ValueError("multistart_gpu_ids requires use_cuda=true")
+    if multistart_gpu_ids:
+        import tmm_cuda
+
+        cp = tmm_cuda.require_cupy()
+        device_count = int(cp.cuda.runtime.getDeviceCount())
+        invalid_ids = [
+            device for device in multistart_gpu_ids
+            if device < 0 or device >= device_count
+        ]
+        if invalid_ids:
+            raise ValueError(
+                f"invalid CUDA device IDs {invalid_ids}; "
+                f"available IDs are 0..{device_count - 1}"
+            )
     if nk_source == "fixed":
         calc = ConstantNkCalculator(nk, use_cuda=use_cuda)
     else:
@@ -933,6 +959,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             if cfg.get("multistart_seed") is not None
             else None
         ),
+        multistart_gpu_ids=multistart_gpu_ids,
         auto_de_fallback=bool(cfg.get("auto_de_fallback", True)),
         auto_min_relative_improvement=float(
             cfg.get("auto_min_relative_improvement", 0.01)
@@ -983,6 +1010,8 @@ def run(stack_path: str, cfg_path: str) -> int:
         print("  nk_source: fixed  (constant n,k from stack file)")
     if use_cuda:
         print("  use_cuda: True (CuPy wavelength-batched TMM)")
+    if multistart_gpu_ids:
+        print(f"  multistart_gpu_ids: {multistart_gpu_ids}")
     if checkpoint_on_best:
         print(f"  checkpoint_on_best: {os.path.join(out_dir, 'stack_best.txt')}")
     if opt.mini_batch:

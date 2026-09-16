@@ -111,6 +111,7 @@ sim/
 - **`method`**：`auto` / `multistart` / `trf` / `lm` / `adam` / `cg` / `lbfgs` / `de` / `dual_annealing`
 - **`auto`**：先运行 Latin-hypercube 多起点局部优化；若指标仍未满足或改善低于阈值，再运行 DE，并用局部方法 polish
 - **`multistart_n`** / **`multistart_method`** / **`multistart_seed`**：多起点数量、局部方法（默认 TRF）与随机种子
+- **`multistart_gpu_ids`**：例如 `[0, 1, 2, 3]`；启用多个独立进程并将每个进程固定到一块 GPU，要求同时设置 `use_cuda: true`
 - **`auto_de_fallback`** / **`auto_min_relative_improvement`**：控制自动全局回退
 - **`use_needle`**：允许改变层数；相关参数为 `max_layers`、`needle_candidate_mode`、`deep_search_candidates`、`needle_probe_nm`、`prune_threshold_nm`
 - **`cg_initial_step_nm`** / **`cg_max_step_nm`** / **`cg_restart`**：CG 专用（默认分别跟 `adam_lr_nm`、`adam_max_step_nm`、自由层数）
@@ -122,6 +123,21 @@ sim/
 - **`mini_batch`**：`true` 或嵌套对象 `{"batch_size", "n_batches", "n_epochs", "shuffle_seed"}`，仅 `method=adam` 时生效
 - **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.txt`，并追加 `best_updates.csv`
 - **`use_cuda`**：`true` 时走 CuPy 批量 TMM（仅 NVIDIA CUDA；macOS 不可用）
+
+多 GPU 并行 Multistart：
+
+```json
+{
+  "method": "multistart",
+  "multistart_n": 8,
+  "multistart_method": "trf",
+  "use_cuda": true,
+  "multistart_gpu_ids": [0, 1, 2, 3]
+}
+```
+
+上述配置启动 4 个进程，每块 GPU 依次处理约 2 个起点；最终结果仍由
+主进程按统一 loss 选择。
 
 ## 指定层数并自动生成膜系
 
