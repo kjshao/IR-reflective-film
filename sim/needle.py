@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass
 from typing import Sequence
 
-from lm_optimizer import BandSpec, LMThicknessOptimizer, OptimResult
+from lm_optimizer import BandSpec, LMThicknessOptimizer, OptimResult, _bounds_for
 from rt_calculator import RTCalculator
 
 
@@ -102,7 +102,10 @@ class NeedleSynthesizer:
         refine_after_add: bool = True,
         n_design_centres: int = 8,
         add_pair: bool = True,
-        candidate_mode: str = "append",
+        candidate_mode: str = "sensitivity",
+        deep_search_candidates: int = 3,
+        needle_probe: float = 1e-9,
+        prune_threshold: float = 10e-9,
         ar_layers: int = 4,
         ar_add_rounds: int = 4,
         front_free_extra: int = 6,
@@ -115,7 +118,10 @@ class NeedleSynthesizer:
         self.refine_after_add = refine_after_add
         self.n_design_centres = n_design_centres
         self.add_pair = add_pair
-        self.candidate_mode = candidate_mode
+        self.candidate_mode = str(candidate_mode).lower()
+        self.deep_search_candidates = max(1, int(deep_search_candidates))
+        self.needle_probe = max(1e-12, float(needle_probe))
+        self.prune_threshold = max(0.0, float(prune_threshold))
         self.ar_layers = ar_layers
         self.ar_add_rounds = ar_add_rounds
         self.front_free_extra = front_free_extra
@@ -130,6 +136,95 @@ class NeedleSynthesizer:
             d2 = _qw_thickness(second, wl0, n_of)
             added.append((second, d2))
         return added
+
+    def _grow_by_sensitivity(
+        self,
+        layers: list[tuple[str, float]],
+        wl0: float,
+        n_of,
+    ) -> tuple[list[tuple[str, float]], OptimResult, int, str]:
+        """Probe every interface/material, then refine the best candidates."""
+        if self.candidate_mode == "append":
+            chunk = self._new_layers(layers, wl0, n_of)
+            chunk = chunk[: max(0, self.max_layers - len(layers))]
+            candidate = list(layers) + chunk
+            result = (
+                self.opt.optimize(candidate, verbose=False)
+                if self.refine_after_add
+                else OptimResult(
+                    candidate, self.opt.cost(candidate), [], 0, False, "append"
+                )
+            )
+            return result.layers, result, len(chunk), "append"
+
+        base_cost = self.opt.cost(layers)
+        probes: list[tuple[float, int, str]] = []
+        for position in range(len(layers) + 1):
+            for material in (self.high_index, self.low_index):
+                left = layers[position - 1][0].lower() if position > 0 else None
+                right = layers[position][0].lower() if position < len(layers) else None
+                if material.lower() == left or material.lower() == right:
+                    continue
+                trial = list(layers)
+                trial.insert(position, (material, self.needle_probe))
+                sensitivity = (self.opt.cost(trial) - base_cost) / self.needle_probe
+                probes.append((sensitivity, position, material))
+        if not probes:
+            empty = OptimResult(
+                list(layers), base_cost, self.opt.residuals(layers), 0, False, "no_probe"
+            )
+            return list(layers), empty, 0, "no_probe"
+
+        probes.sort(key=lambda item: item[0])
+        best_result: OptimResult | None = None
+        best_label = ""
+        for sensitivity, position, material in probes[: self.deep_search_candidates]:
+            lo, _ = _bounds_for(material, self.opt.min_thickness)
+            trial = list(layers)
+            trial.insert(position, (material, lo))
+            result = (
+                self.opt.optimize(trial, verbose=False)
+                if self.refine_after_add
+                else OptimResult(
+                    trial, self.opt.cost(trial), [], 0, False, "needle_probe"
+                )
+            )
+            if best_result is None or result.cost < best_result.cost:
+                best_result = result
+                best_label = (
+                    f"needle pos={position} mat={material} "
+                    f"dL/dd={sensitivity:.3e}"
+                )
+        assert best_result is not None
+        return best_result.layers, best_result, 1, best_label
+
+    def _prune(
+        self, layers: list[tuple[str, float]], *, verbose: bool
+    ) -> tuple[list[tuple[str, float]], OptimResult | None]:
+        """Delete thin layers when re-refinement preserves specs and merit."""
+        if self.prune_threshold <= 0.0:
+            return layers, None
+        current = list(layers)
+        last: OptimResult | None = None
+        changed = True
+        while changed and len(current) > 1:
+            changed = False
+            for i, (_, thickness) in enumerate(current):
+                if thickness > self.prune_threshold:
+                    continue
+                trial = current[:i] + current[i + 1 :]
+                result = self.opt.optimize(trial, verbose=False)
+                _, _, ok, _ = self.opt.evaluate(result.layers)
+                if ok and result.cost <= self.opt.cost(current) * (1.0 + 1e-6):
+                    if verbose:
+                        print(
+                            f"    prune: removed layer {i}; "
+                            f"{len(current)} -> {len(result.layers)}",
+                            flush=True,
+                        )
+                    current, last, changed = result.layers, result, True
+                    break
+        return current, last
 
     def _stop_ok(self, layers: Sequence[tuple[str, float]], stop_bands: Sequence[BandSpec]) -> bool:
         saved = self.opt.bands
@@ -280,7 +375,8 @@ class NeedleSynthesizer:
                 best_stop, best_stop_cost = list(layers), last_lm.cost
             if verbose:
                 print(
-                    f"    phase 1 after LM: stop_ok={stop_ok}  cost={last_lm.cost:.6e}  "
+                    f"    phase 1 after local refine: stop_ok={stop_ok}  "
+                    f"cost={last_lm.cost:.6e}  "
                     f"Σd={sum(d for _, d in layers)*1e9:.1f} nm",
                     flush=True,
                 )
@@ -294,23 +390,12 @@ class NeedleSynthesizer:
                     break
 
                 wl0 = centres[(round_i - 1) % len(centres)]
-                chunk = self._new_layers(layers, wl0, n_of)
-                if len(layers) + len(chunk) > self.max_layers:
-                    chunk = chunk[: max(0, self.max_layers - len(layers))]
-                if not chunk:
+                layers, last_lm, added, growth_label = self._grow_by_sensitivity(
+                    list(layers), wl0, n_of
+                )
+                if added == 0:
                     break
-
-                cand = list(layers) + chunk
-                if self.refine_after_add:
-                    lm = self.opt.optimize(cand, verbose=False)
-                    layers = lm.layers
-                    last_lm = lm
-                else:
-                    layers = cand
-                    last_lm = OptimResult(
-                        layers, self.opt.cost(layers), [], 0, False, ""
-                    )
-                n_added += len(chunk)
+                n_added += added
                 _, _, stop_ok, _ = self.opt.evaluate(layers)
                 thick = sum(d for _, d in layers)
                 if stop_ok and last_lm.cost < best_stop_cost:
@@ -318,9 +403,9 @@ class NeedleSynthesizer:
                 if verbose:
                     status = "OK" if stop_ok else "miss"
                     print(
-                        f"    add #{round_i}: +{len(chunk)} -> {len(layers)} layers  "
+                        f"    add #{round_i}: +{added} -> {len(layers)} layers  "
                         f"λ0={wl0*1e9:.0f} nm  cost={last_lm.cost:.6e}  "
-                        f"Σd={thick*1e9:.1f} nm  stop[{status}]",
+                        f"Σd={thick*1e9:.1f} nm  stop[{status}]  {growth_label}",
                         flush=True,
                     )
 
@@ -450,7 +535,7 @@ class NeedleSynthesizer:
                     break
 
         if verbose:
-            print("    phase 2b: IR-constrained joint coarse + LM", flush=True)
+            print("    phase 2b: constrained joint coarse + local refine", flush=True)
 
         stop_filter = (
             (lambda L: self._stop_ok(L, stop_bands)) if stop_bands else None
@@ -467,7 +552,10 @@ class NeedleSynthesizer:
         layers = last_lm.layers
         if stop_bands and not self._stop_ok(layers, stop_bands):
             if verbose:
-                print("      joint LM broke IR stop; reverting to coarse result", flush=True)
+                print(
+                    "      joint refine broke stop band; reverting to coarse result",
+                    flush=True,
+                )
             layers = coarse.layers
             last_lm = coarse
 
@@ -487,6 +575,11 @@ class NeedleSynthesizer:
             layers = best_ok
             last_lm = self.opt.optimize(layers, verbose=False)
             layers = last_lm.layers
+            _, _, ok, report = self.opt.evaluate(layers)
+
+        layers, pruned = self._prune(layers, verbose=verbose)
+        if pruned is not None:
+            last_lm = pruned
             _, _, ok, report = self.opt.evaluate(layers)
 
         assert last_lm is not None
@@ -521,7 +614,7 @@ def make_optimizer_from_config(
         fd_step=cfg.get("fd_step", 0.5e-9),
         lambda0=cfg.get("lambda0", 1e-2),
         max_iter=cfg.get("max_iter", 40),
-        method=cfg.get("method", "lm"),
+        method=cfg.get("method", "trf"),
         adam_lr=cfg.get("adam_lr", 2e-9),
         adam_beta1=cfg.get("adam_beta1", 0.9),
         adam_beta2=cfg.get("adam_beta2", 0.999),
@@ -532,6 +625,14 @@ def make_optimizer_from_config(
         cg_restart=cfg.get("cg_restart"),
         lbfgs_m=int(cfg.get("lbfgs_m", 10)),
         lbfgs_maxls=int(cfg.get("lbfgs_maxls", 20)),
+        trf_x_scale=cfg.get("trf_x_scale", "jac"),
+        multistart_n=int(cfg.get("multistart_n", 8)),
+        multistart_method=cfg.get("multistart_method", "trf"),
+        multistart_seed=cfg.get("multistart_seed", 0),
+        auto_de_fallback=bool(cfg.get("auto_de_fallback", True)),
+        auto_min_relative_improvement=float(
+            cfg.get("auto_min_relative_improvement", 0.01)
+        ),
         mini_batch=bool(cfg.get("mini_batch", False)),
         batch_size=int(cfg.get("batch_size", 8)),
         n_batches=cfg.get("n_batches"),

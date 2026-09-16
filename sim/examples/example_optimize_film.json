@@ -1,7 +1,12 @@
 {
-  "comment": "3-band joint R optimisation on a constant-n,k text stack (adam|lm|de|dual_annealing).",
+  "comment": "3-band joint R optimization; auto = multi-start TRF with DE fallback.",
   "n_bands": 3,
-  "method": "adam",
+  "method": "auto",
+  "multistart_method": "trf",
+  "multistart_n": 6,
+  "multistart_seed": 0,
+  "auto_de_fallback": true,
+  "auto_min_relative_improvement": 0.01,
   "bands": [
     {
       "wavelength_nm": [420, 700],

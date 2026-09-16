@@ -10,9 +10,9 @@
 |------|------|
 | `sim/tmm.py` | 传输矩阵法（TMM）核心 |
 | `sim/rt_calculator.py` | TMM / 外部引擎统一接口 |
-| `sim/lm_optimizer.py` | 厚度精修（LM / Adam / DE / 双退火） |
-| `sim/needle.py` | 逐层合成（层数可变） |
-| `sim/optimize_film.py` | 文本膜系入口（当前：固定层数厚度优化） |
+| `sim/lm_optimizer.py` | 厚度精修（TRF / LM / Adam / L-BFGS-B / DE / 双退火） |
+| `sim/needle.py` | 灵敏度 Needle、Deep Search 候选与剪枝 |
+| `sim/optimize_film.py` | 文本膜系统一入口（固定层数或 `use_needle` 合成） |
 | `sim/plot_rt.py` / `sim/plot_rt_txt.py` | 光谱计算与绘图 |
 
 **配置示例**
@@ -163,7 +163,7 @@ Ma 等（arXiv:2409.17199, 2024）对多层薄膜逆设计的归纳：
                   ▼
 ┌───────────────────────────────────────────┐
 │ 精修层：厚度优化                            │
-│ 粗搜索 → LM / Adam → DE / 双退火 polish     │
+│ 多起点 TRF → DE / 双退火 → TRF polish       │
 │ 决定 d_1,…,d_N（固定拓扑）                  │
 └─────────────────┬─────────────────────────┘
                   │
@@ -211,13 +211,13 @@ Trubetskov（Appl. Opt. **59**, A75, 2020）进一步指出：**标准 Needle �
 
 ## 3. 残差构造（光谱目标 → 可优化量）
 
-`lm_optimizer.build_residuals` 将光谱目标转为残差向量 $\mathbf{r}$，最小化
+`lm_optimizer.build_residuals` 将光谱目标转为**固定长度**残差向量 $\mathbf{r}$，所有算法统一最小化
 
 $$
 \frac{1}{2}\,\lVert \mathbf{r} \rVert^2
 $$
 
-对每个波段 $b$、每个采样波长 $\lambda$：
+对每个波段 $b$、每个采样波长 $\lambda$，同时支持四个方向：
 
 $$
 \begin{aligned}
@@ -228,7 +228,7 @@ T > T_{\max} &\Rightarrow r \mathrel{+}= \sqrt{w}\,(T - T_{\max})
 \end{aligned}
 $$
 
-若已达标且存在连续目标：
+存在连续目标时始终加入：
 
 $$
 \begin{aligned}
@@ -237,11 +237,14 @@ T_{\mathrm{target}} \text{ 已设} &\Rightarrow r \mathrel{+}= \sqrt{w'}\,(T - T
 \end{aligned}
 $$
 
+每项实际乘以 $\sqrt{2w_b/(W n_b)}$，其中 $W=\sum_b w_b$、$n_b$ 为波段采样数，使 $L$ 等于波段归一化均方误差。厚度残差始终存在而非仅在光谱可行时出现，因此可行边界两侧的残差维度不变。
+
 **设计要点**
 
-1. **可行性优先**：未达标时主要惩罚违反量；达标后再加强连续目标，避免已满足波段被压垮。
+1. **语义完整**：`R_min/R_max/T_min/T_max` 均进入优化，而不只是进入最终检查。
 2. **波段归一化**：每波段先取均值再加权（`optimize_film.reflectance_mse`），使 $w_b$ 与波段内采样点数无关。
-3. **厚度项**：$\sqrt{2\lambda_d}\cdot\sum_i d_i/d_{\mathrm{ref}}$ 作为额外残差分量。
+3. **同一目标**：TRF、LM、Adam、CG、L-BFGS-B、DE 与报告值均使用 $L=\frac12\|\mathbf r\|^2$。
+4. **厚度项**：$\sqrt{2\lambda_d}\cdot\sum_i d_i/d_{\mathrm{ref}}$ 作为额外残差分量。
 
 **极值目标映射**（文本栈优化器）：
 
@@ -262,7 +265,16 @@ $$
 - 仅接受 cost 下降，或满足 stop-band 约束的候选（`accept_fn`）
 - 作用：跳出 LM 局部极小，为精修提供更好初值
 
-### 4.2 Levenberg–Marquardt（默认局部精修）
+### 4.2 TRF（默认局部精修）
+
+默认采用 SciPy `least_squares(method="trf")`：
+
+- 原生处理各材料膜厚上下界；
+- 以 nm 作为数值变量，避免以 m 优化导致尺度病态；
+- 利用残差雅可比和信赖域控制步长；
+- 适合作为多起点局部优化及 DE 后 polish。
+
+### 4.3 Levenberg–Marquardt
 
 求解阻尼正规方程：
 
@@ -274,24 +286,30 @@ $$
 - 厚度投影到 $[d_{\min},\, d_{\max}]$
 - 适合不等式 + 连续目标混合、残差维数适中的问题；Needle 每步插入后的 Refinement 首选
 
-### 4.3 Adam + 波长 mini-batch
+### 4.4 Adam + 波长 mini-batch
 
 - 层数多、波长点多时，每步随机抽取波长子集
 - 每 epoch 记录**全网格** cost，防止过拟合子集
 - 配置见 `optimize_film.py` 的 `mini_batch` 对象；仅 `method=adam` 时生效
 
-### 4.4 全局厚度精修（DE / 双退火）
+### 4.5 多起点与自动回退
+
+- `method=multistart`：Latin-hypercube 生成多个厚度初值，每个初值运行 TRF（也可选 L-BFGS-B/LM/CG）。
+- `method=auto`：先多起点局部优化；若指标仍未满足或相对改善不足，自动执行 DE，再用局部方法 polish。
+- TMM 计算较便宜时，多起点通常比直接全空间运行大种群更节省预算。
+
+### 4.6 全局厚度精修（DE / 双退火）
 
 固定拓扑、多峰或初值差时：
 
 - `method=de`：差分进化，在厚度盒约束 $[d_{\min}, d_{\max}]^N$ 内搜索
 - `method=dual_annealing`：双退火，更强随机跳跃
-- 再用 `global_polish_method`（`lm` / `adam`）局部精修
+- 再用 `global_polish_method`（推荐 `trf`，也可用 `lm` / `adam` / `lbfgs`）局部精修
 - 输出 `stack_global.*`（全局阶段）与 `stack_polished.*`（精修后）
 
 文献（IEEE IMOC 2009；IET Optoelectronics 2025）表明：在固定拓扑的连续厚度精修中，**DE 通常优于 GA**，且优于 PSO 处理有界多峰问题。
 
-### 4.5 最优 checkpoint 选择
+### 4.7 最优 checkpoint 选择
 
 不仅比较 cost，还比较相对初始厚度的 RMS 变化 $\Delta$（`checkpoint_score` / `is_better_checkpoint`）：
 
@@ -311,7 +329,7 @@ $$
 
 ## 5. 合成层：层数与拓扑
 
-实现见 `sim/needle.py` 的 `NeedleSynthesizer`。适用于**可见高透 + 红外高反**等分阶段目标。与 GA/SA 在合成层**同级**；当前仓库以 Needle 简化实现为主（追加 H/L 四分之一波长对），经典灵敏度 Needle（§5.5）为升级方向。
+实现见 `sim/needle.py` 的 `NeedleSynthesizer`。适用于**可见高透 + 红外高反**等分阶段目标。与 GA/SA 在合成层**同级**。默认在所有界面分别插入 H/L 探针层，按有限差分 merit 灵敏度排序，对 top-k 候选执行完整局部精修；`candidate_mode=append` 保留旧的末端追加模式。
 
 ### 5.1 波段拆分
 
@@ -330,11 +348,11 @@ layers ← 初始种子（啁啾 1/4 波长堆 或用户 layers）
 optimizer.bands ← stop_bands
 
 repeat round = 1 .. max_add_rounds:
-    layers ← LM_optimize(layers)          // 精修层
+    layers ← TRF_optimize(layers)         // 精修层
     if stop_ok(layers):
         break
-    λ₀ ← design_wavelengths[round % n_centres]
-    layers += QW_pair(H, L) at λ₀         // 合成层：增层
+    probes ← all (interface, H/L) needle variations
+    layers ← best(top-k probes after TRF refinement)
     if len(layers) >= max_layers:
         break
 
@@ -357,21 +375,21 @@ layers ← best_stop_feasible(layers)
 ```text
 optimizer.bands ← all_bands
 layers ← coarse_descent(layers, accept_fn=stop_ok)
-layers ← LM_optimize(layers)
+layers ← TRF_optimize(layers)
 ```
 
 达标后逐步增大 $\lambda_d$（`thickness_weight`），在保持指标前提下压薄。
 
-### 5.5 经典 Needle 法（扩展方向）
+### 5.5 灵敏度 Needle 与剪枝
 
 在相邻层界面 $i$ 处试探厚度 $\delta \to 0^{+}$ 的针状薄层：
 
-1. 计算 $\partial L / \partial \delta$（伴随法或有限差分）
+1. 以 `needle_probe_nm` 在每个界面试探 H/L，有限差分计算 $\partial L / \partial \delta$
 2. 若 $\partial L/\partial \delta < 0$ 且超阈值，在该位置插入新材料
 3. 插入后调用精修层（§4）
-4. **反向剪枝**：若 $d_i < d_{\mathrm{prune}}$ 或 $|\partial L/\partial d_i| \approx 0$，删除该层并重优化
+4. **反向剪枝**：若 $d_i <$ `prune_threshold_nm`，删除并重优化；仅在指标仍满足且 merit 不恶化时接受
 
-比盲目追加 H/L 对更精细；OptiLayer Deep Search 在此基础上枚举多个插入候选。
+`deep_search_candidates` 控制进行完整精修的候选数量。当前实现为有限差分 Needle；伴随灵敏度和低灵敏度厚层剪枝仍是后续性能升级方向。
 
 ### 5.6 黑盒合成备选（无好初值时）
 
@@ -392,11 +410,11 @@ layers ← LM_optimize(layers)
 
 ### 6.1 按问题维度的适用性
 
-| 优化子问题 | 推荐排序（文献共识） | 本仓库 `method` |
+| 优化子问题 | 推荐策略 | 本仓库配置 |
 |-----------|---------------------|-----------------|
 | 层数 + 材料 + 厚度（完整 MINLP） | Needle/GE $\gg$ SA $\gtrsim$ GA $\gtrsim$ DE（可变长）$\gg$ PSO | `use_needle: true` |
-| 固定拓扑，厚度多峰 | DE $\gtrsim$ SA $\gtrsim$ LM $\gg$ PSO $\gg$ GA | `de` / `dual_annealing` |
-| 固定拓扑，光滑 merit | LM / Adam $\gg$ DE | `lm` / `adam` |
+| 固定拓扑，厚度多峰 | 多起点局部搜索；失败后 DE + 局部 polish | `method=auto` |
+| 固定拓扑，光滑 merit | 有界 TRF / L-BFGS-B | `trf` / `lbfgs` |
 | 层数 $>12$ 或 $\lambda$ 点 $>200$ | Adam mini-batch +（可选）CUDA | `adam` + `mini_batch` |
 
 ### 6.2 膜层 + 厚度联合优化总排序
@@ -407,7 +425,7 @@ $$
 \text{推荐度：}\;
 \underbrace{\text{Needle}+\text{Refinement}}_{\text{合成+精修}}
 \;>\;
-\underbrace{\text{DE}+\text{LM polish}}_{\text{精修层全局}}
+\underbrace{\text{DE}+\text{TRF polish}}_{\text{精修层全局}}
 \;>\;
 \text{SA/DA}
 \;>\;
@@ -419,17 +437,17 @@ $$
 说明：
 
 1. **Needle + Refinement** 不是单一黑盒算法，而是文献与工业（OptiLayer、TFCalc）公认的联合优化首选。
-2. **DE** 在纯元启发式中居首，尤其适合固定拓扑厚度精修及 Needle 内 LM 失败时的救火。
+2. **DE** 适合固定拓扑厚度精修及 Needle 内局部搜索失败时的救火，但不存在对所有目标和计算预算都成立的算法总排序。
 3. **PSO** 在薄膜领域多为向量化厚度优化（Ma 2024：非全局设计），不宜作为完整 MINLP 的首选。
 
 ### 6.3 协同关系小结
 
 | 关系 | 含义 | 示例 |
 |------|------|------|
-| **合成 $\to$ 精修** | 主层级；每次改结构后必精修厚度 | Needle 插入 $\to$ LM |
+| **合成 $\to$ 精修** | 主层级；每次改结构后必精修厚度 | Needle 插入 $\to$ TRF |
 | **合成 $\parallel$ 合成** | 同级替代 | Needle $\leftrightarrow$ GA/SA |
 | **精修 $\subset$ 合成** | 元启发式作为 Needle 内嵌引擎 | Needle 步后 `method=de` polish |
-| **精修 $\to$ 精修** | 全局精修后局部 polish | DE $\to$ `global_polish_method=lm` |
+| **精修 $\to$ 精修** | 全局精修后局部 polish | DE $\to$ `global_polish_method=trf` |
 | **合成增强** | 同族扩展，非黑盒替代 | Deep Search Needle |
 
 ---
@@ -466,7 +484,7 @@ $$
 |----|------|
 | **适用** | 多波段 R/T 目标；有啁啾种子；可见+红外联合设计 |
 | **合成** | Needle Phase 1/2（`NeedleSynthesizer`） |
-| **精修** | `method=lm` |
+| **精修** | `method=trf` |
 | **示例** | `sim/examples/example_vis_pass_ir_reflect.json` |
 | **文献** | Tikhonravov et al., Appl. Opt. 35, 5493 (1996) |
 
@@ -476,7 +494,7 @@ $$
 |----|------|
 | **适用** | 实验栈、文献复现；层数与材料已定 |
 | **合成** | — |
-| **精修** | `method=lm` 或 `adam` |
+| **精修** | `method=trf` 或 `lbfgs` |
 | **入口** | `optimize_film.py` + 文本 `stack.txt` |
 | **示例** | `sim/examples/example_optimize_film.json` |
 
@@ -500,7 +518,7 @@ python3 sim/optimize_film.py \
 | 项 | 内容 |
 |----|------|
 | **适用** | 拓扑固定；LM/Adam cost 平台化 |
-| **精修** | `method=de`，`global_polish_method=lm` |
+| **精修** | `method=de`，`global_polish_method=trf` |
 | **示例** | `sim/examples/example_optimize_de.json` |
 
 ```json
@@ -509,7 +527,7 @@ python3 sim/optimize_film.py \
   "max_iter": 40,
   "de_popsize": 15,
   "global_polish": true,
-  "global_polish_method": "lm"
+  "global_polish_method": "trf"
 }
 ```
 
@@ -527,8 +545,8 @@ python3 sim/optimize_film.py \
 | 项 | 内容 |
 |----|------|
 | **适用** | Needle 增层后 LM 反复陷入局部极 |
-| **流程** | Needle 合成 $\to$ 若 cost 无改善：对当前拓扑 `method=de` $\to$ LM polish $\to$ 继续 Needle |
-| **现状** | 可手动串联：Needle 输出栈 $\to$ `optimize_film.py` + DE 配置；⬜ 自动 fallback 待整合 |
+| **流程** | Needle 合成 $\to$ 若 cost 无改善：对当前拓扑 `method=de` $\to$ TRF polish $\to$ 继续 Needle |
+| **现状** | `method=auto` 已实现多起点局部优化与 DE 自动 fallback |
 
 ### 7.8 路径 G：大规模性能（Adam mini-batch）
 
@@ -537,14 +555,14 @@ python3 sim/optimize_film.py \
 | **适用** | $N_{\mathrm{layer}}>12$ 或 $N_{\lambda}>200$ |
 | **精修** | `method=adam` + `mini_batch`；可选 `use_cuda` |
 | **示例** | `sim/examples/example_optimize_film_minibatch.json` |
-| **注意** | Needle 外层仍建议 `method=lm`；mini-batch 用于精修阶段 |
+| **注意** | Needle 外层建议 `method=trf`；mini-batch 仅用于大规模精修阶段 |
 
 ### 7.9 路径 H：双退火精修
 
 | 项 | 内容 |
 |----|------|
 | **适用** | 固定拓扑；DE 效果一般；merit 地形更崎岖 |
-| **精修** | `method=dual_annealing`，`global_polish_method=lm` |
+| **精修** | `method=dual_annealing`，`global_polish_method=trf` |
 | **文献** | Chang et al., Opt. Lett. 15, 595 (1990) |
 
 ### 7.10 路径 I：后处理剪枝压薄（规划）
@@ -554,7 +572,7 @@ python3 sim/optimize_film.py \
 | **适用** | 光谱达标但总厚度偏大 |
 | **流程** | 删 $d_i<d_{\mathrm{prune}}$ 或低灵敏度层 $\to$ LM $\to$ 增大 $\lambda_d$ |
 | **文献** | OptiLayer Design Cleaner；Tikhonravov 2007 |
-| **现状** | ⬜ 待实现；临时可手动删层后走路径 B |
+| **现状** | 已实现薄层阈值剪枝；低灵敏度厚层剪枝仍待实现 |
 
 ### 7.11 失败恢复矩阵
 
@@ -572,10 +590,10 @@ python3 sim/optimize_film.py \
 ### 7.12 本仓库 IR 反射膜推荐默认
 
 ```text
-默认：路径 C（分阶段 Needle），method=lm，种子 chirped_qw
-失败：路径 F（当前栈 DE polish）→ 回 Needle
-固定实验栈：路径 B（optimize_film.py）
-固定栈 LM 卡住：路径 D（de + global_polish_method=lm）
+默认：路径 C（分阶段 Needle），method=trf，种子 chirped_qw
+失败：method=auto（多起点 TRF → DE + TRF polish）
+固定实验栈：路径 B（optimize_film.py，method=auto）
+固定栈局部搜索卡住：路径 D（de + global_polish_method=trf）
 ```
 
 ---
@@ -638,42 +656,44 @@ python3 sim/optimize_film.py \
 |----------|----------|----------|
 | TMM 前向 | `tmm.py`, `rt_calculator.py` | ✅ 已实现 |
 | 残差 / cost | `lm_optimizer.build_residuals` | ✅ 已实现 |
-| LM / Adam / DE / 双退火 | `lm_optimizer.LMThicknessOptimizer` | ✅ 已实现 |
+| TRF / LM / Adam / CG / L-BFGS-B / DE / 双退火 | `lm_optimizer.LMThicknessOptimizer` | ✅ 已实现 |
 | 粗搜索 | `coarse_descent` | ✅ 已实现 |
 | checkpoint 选择 | `checkpoint_score`, `is_better_checkpoint` | ✅ 已实现 |
 | Needle 合成层 | `needle.NeedleSynthesizer` | ✅ 已实现 |
 | 固定层数 R 极值优化 | `optimize_film.py` | ✅ 当前入口 |
-| Needle + 统一入口 | `optimize_film.py` + `needle.py` | ⬜ 待整合（路径 A/C 一键运行） |
-| DE fallback 自动化 | — | ⬜ 待整合（路径 F） |
-| 剪枝 / 灵敏度 Needle | — | ⬜ 待实现（路径 I / §5.5） |
+| Needle + 统一入口 | `optimize_film.py` + `needle.py` | ✅ `use_needle: true` |
+| DE fallback 自动化 | `method=auto` | ✅ 已实现 |
+| 薄层剪枝 / 有限差分灵敏度 Needle | `needle.py` | ✅ 已实现 |
 | 外层 GA/SA 合成驱动 | — | ⬜ 待实现（路径 E） |
-| 文本栈层数可变 | `optimize_film.py` | ⬜ 待扩展 |
+| 文本栈层数可变 | `optimize_film.py` | ✅ 已实现 |
 
 ---
 
-## 10. 推荐整合路线
+## 10. 整合状态与后续路线
 
-### 阶段 A：统一目标语义
+### 阶段 A：统一目标语义（已完成）
 
-- 将 `optimize_film.py` 的 `RObjectiveBand`（maximize/minimize）与 `lm_optimizer.BandSpec`（R_min/R_max/T_min）双向映射
-- 文本栈与 JSON 膜系共用同一套 `bands` 配置格式
+- `build_residuals` 完整支持 `R_min/R_max/T_min/T_max`，且可行边界两侧残差长度不变
+- 所有优化器与报告统一使用 $\frac12\|\mathbf r\|^2$
+- 文本入口的 `RObjectiveBand` 已映射为 `BandSpec`；统一 R/T 输入格式仍可继续扩展
 
-### 阶段 B：接入 Needle 合成层
+### 阶段 B：接入 Needle 合成层（已完成）
 
 - `optimize_film.py` 增加 `use_needle: true` 开关
-- 层数由 `NeedleSynthesizer` 决定，厚度由 `LMThicknessOptimizer` 决定
+- 层数由 `NeedleSynthesizer` 决定，厚度由 TRF 等局部方法决定
 - 输出 `stack_best.txt` 在增层时同步更新层数
 
-### 阶段 C：剪枝与灵敏度 Needle
+### 阶段 C：剪枝与灵敏度 Needle（基础版本已完成）
 
-- Phase 2 结束后删除 $d < d_{\mathrm{prune}}$ 的层并重优化
-- 可选：界面 Needle 灵敏度指导增层位置（§5.5）
+- Phase 2 结束后尝试删除 $d <$ `prune_threshold_nm` 的层并重优化
+- 默认枚举界面与 H/L 材料探针，并精修 top-k 候选（§5.5）
+- 后续可增加伴随梯度和低灵敏度厚层剪枝
 
-### 阶段 D：性能与自动 fallback
+### 阶段 D：性能与自动 fallback（已完成）
 
 - `use_cuda: true` 启用 CuPy 波长批量 TMM
 - Adam mini-batch 用于 $N_{\mathrm{layer}}>12$ 或 $N_{\lambda}>200$（路径 G）
-- LM 连续无改善时自动切换 `method=de`（路径 F）
+- `method=auto` 在多起点 TRF 未达标或改善不足时自动切换 DE（路径 F）
 
 ---
 
@@ -697,12 +717,17 @@ python3 sim/optimize_film.py \
 | `max_add_rounds` | 8–20 | Phase 1 增层轮数 |
 | `thickness_weight` | $0 \to 0.01$–$0.05$ | 达标后逐步增大以压薄 |
 | `fd_step_nm` | 0.5–2 | LM 有限差分步长 |
+| `method` | `auto` | 多起点 TRF，未达标或改善不足时 DE 回退 |
+| `multistart_n` | 4–12 | Latin-hypercube 初值数量 |
+| `multistart_method` | `trf` | 每个初值采用的有界局部方法 |
+| `auto_min_relative_improvement` | 0.01 | 触发 DE 回退的最小相对改善 |
 | `min_thickness_nm` | 8（默认） | 单层最小厚度（nm）；抬高优化厚度下界 |
 | `nk_source` | `library`（默认） / `fixed` | `library`：按材料名从色散库读 n(λ),k(λ)；`fixed`：用文本膜系常数 n,k |
-| `error_power` | 2 或 4 | $>2$ 时加重离群点（纹波） |
 | `checkpoint_delta_weight` | 0 | $>0$ 时偏好厚度变化小的解 |
 | `de_popsize` | 12–20 | DE 种群规模 |
-| `global_polish_method` | `lm` | DE/退火后局部精修 |
+| `global_polish_method` | `trf` | DE/退火后局部精修 |
+| `deep_search_candidates` | 2–5 | Needle 每轮进行完整精修的候选数量 |
+| `prune_threshold_nm` | 8–15 | 达标后尝试删除的薄层阈值 |
 
 ### 11.3 失败时的排查顺序
 
@@ -729,7 +754,10 @@ python3 sim/optimize_film.py \
     {"wavelength_nm": [420, 700], "objective": "minimize", "weight": 2.0},
     {"wavelength_nm": [780, 1800], "objective": "maximize", "weight": 1.0}
   ],
-  "method": "adam",
+  "method": "auto",
+  "multistart_method": "trf",
+  "multistart_n": 8,
+  "auto_de_fallback": true,
   "max_iter": 40,
   "use_needle": false,
   "wavelength_step_nm": 15,
@@ -764,7 +792,7 @@ python3 sim/optimize_film.py \
   "use_needle": false,
   "de_popsize": 15,
   "global_polish": true,
-  "global_polish_method": "lm",
+  "global_polish_method": "trf",
   "global_seed": 42
 }
 ```
@@ -789,7 +817,7 @@ python3 sim/optimize_film.py \
 
 1. **主层级为合成 $\leftrightarrow$ 精修**，而非在 Needle、DE、GA、PSO 中做简单横向排序。
 2. **Needle + Refinement** 是联合优化层数与厚度的首选；Needle 每步内嵌精修，与 DE/GA 在合成层同级、在精修层嵌套。
-3. **精修层**：LM/Adam 为默认；多峰时用 DE $\to$ LM polish；大规模用 Adam mini-batch。
+3. **精修层**：有界 TRF 为默认；多峰时用多起点 TRF，必要时 DE $\to$ TRF polish；大规模可用 Adam mini-batch。
 4. **多条可选路径**（§7）按起点条件与失败症状选择；IR 反射膜默认走路径 C，固定栈走路径 B/D。
 5. **后处理剪枝压薄**在达标后减小总厚度；Deep Search Needle 用于 $>50$ 层或相位/GDD 等复杂目标。
 

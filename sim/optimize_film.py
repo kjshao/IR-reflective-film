@@ -1,4 +1,4 @@
-"""Thickness-only Adam/LM optimiser for a plain-text constant-n,k stack.
+"""Bounded thickness optimization and optional Needle synthesis for text stacks.
 
 Initial stack format matches ``plot_rt_txt.py``. Optimises **coating** layer
 thicknesses only; the first row (incident medium) and last row (substrate)
@@ -13,11 +13,11 @@ Initial thicknesses: stack-file values by default. Set ``init.mode`` to
 ``random_uniform``, or ``random_init: true``, to draw a reproducible random
 guess while keeping the material sequence.
 
-Objective: build a piecewise R target per band, then minimise band-normalized
-RMSE plus an optional thickness penalty::
+Objective: build a piecewise R target per band, then minimize one shared
+band-normalized least-squares merit plus an optional thickness penalty::
 
-    RMSE = sqrt( Σ_b w_b · mean_{λ∈b} (R − t_b)²  /  Σ_b w_b )
-    L    = RMSE + thickness_weight · (Σ d / d_ref)²
+    L = Σ_b w_b · mean_{λ∈b} (R − t_b)² / Σ_b w_b
+        + thickness_weight · (Σ d / d_ref)²
 
 Each band sets ``t_b`` via ``R_target`` (0–1). If omitted, ``objective:
 maximize|minimize`` defaults to ``t_b = 1`` or ``0``. Independent of sample
@@ -29,7 +29,11 @@ Usage::
         sim/examples/example_stack.txt \\
         sim/examples/example_optimize_film.json
 
-Training modes (``method=adam``):
+The default ``method=auto`` runs Latin-hypercube multi-start TRF, then uses
+DE with local polish if the local stage remains infeasible or barely improves.
+Set ``use_needle=true`` to allow sensitivity-guided layer insertion and pruning.
+
+Adam training modes:
 
   - **full grid** (default): each iteration uses the full wavelength grid.
   - **mini-batch**: set ``mini_batch`` true or to an object with
@@ -39,7 +43,8 @@ Training modes (``method=adam``):
     ``(λ_max−λ_min)/batch_size``, wrapping at ``λ_max`` back to ``λ_min``.
     One Adam step per batch; full-grid cost is recorded per epoch.
 
-Other local methods: ``method=lm`` (Gauss–Newton on residuals),
+Other local methods: ``method=trf`` (bounded trust-region least squares),
+``method=lm`` (projected Gauss–Newton on residuals),
 ``method=cg`` (Polak–Ribière nonlinear CG on the scalar loss),
 ``method=lbfgs`` (scipy L-BFGS-B on the scalar loss; needs scipy).
 """
@@ -60,6 +65,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tmm
 import dispersion as dsp
 from lm_optimizer import BandSpec, LMThicknessOptimizer, _bounds_for
+from needle import NeedleSynthesizer
 from plot_rt import (
     close_all_figures,
     configure_matplotlib,
@@ -554,7 +560,7 @@ def build_maxmin_r_residuals(
 
 
 class MaxMinROptimizer(LMThicknessOptimizer):
-    """Adam/LM thickness optimiser minimizing RMSE + optional thickness."""
+    """Thickness optimiser minimizing one shared residual least-squares merit."""
 
     def __init__(
         self,
@@ -583,11 +589,9 @@ class MaxMinROptimizer(LMThicknessOptimizer):
         )
 
     def cost(self, layers: Sequence[tuple[str, float]]) -> float:
-        """Band-normalized RMSE + thickness penalty."""
-        R, _T = self._rt(layers)
-        return reflectance_rmse(
-            R, self.rbands, self.wavelengths
-        ) + thickness_penalty(layers, thickness_weight=self.thickness_weight)
+        """Use exactly the merit optimized by LM/TRF and scalar methods."""
+        r = self.residuals(layers)
+        return 0.5 * sum(v * v for v in r)
 
 
 def nk_table(
@@ -644,8 +648,9 @@ def write_stack_txt(
             f"{idx}  {mat}  {d / _NM:.4f}  {N.real:.6g}  {N.imag:.6g}"
         )
     Ns = _N(substrate.material)
+    substrate_index = substrate.index if film_indices is not None else len(films) + 1
     lines.append(
-        f"{substrate.index}  {substrate.material}  {substrate.thickness_nm:.6g}  "
+        f"{substrate_index}  {substrate.material}  {substrate.thickness_nm:.6g}  "
         f"{Ns.real:.6g}  {Ns.imag:.6g}"
     )
     with open(path, "w", encoding="utf-8") as fh:
@@ -843,8 +848,9 @@ def run(stack_path: str, cfg_path: str) -> int:
     layers0, init_note = apply_init_layers(layers_file, rbands, cfg)
     film_indices = [r.index for r in film_rows]
     free_indices = list(range(len(layers0)))
+    use_needle = bool(cfg.get("use_needle", False))
 
-    method = str(cfg.get("method", "adam")).lower()
+    method = str(cfg.get("method", "auto")).lower()
     angle_deg = float(cfg.get("incident_angle_deg", 0.0))
     theta0 = math.radians(angle_deg)
     pol = str(cfg.get("polarization", "unpolarized"))
@@ -911,6 +917,18 @@ def run(stack_path: str, cfg_path: str) -> int:
         ),
         lbfgs_m=int(cfg.get("lbfgs_m", 10)),
         lbfgs_maxls=int(cfg.get("lbfgs_maxls", 20)),
+        trf_x_scale=cfg.get("trf_x_scale", "jac"),
+        multistart_n=int(cfg.get("multistart_n", 8)),
+        multistart_method=str(cfg.get("multistart_method", "trf")),
+        multistart_seed=(
+            int(cfg["multistart_seed"])
+            if cfg.get("multistart_seed") is not None
+            else None
+        ),
+        auto_de_fallback=bool(cfg.get("auto_de_fallback", True)),
+        auto_min_relative_improvement=float(
+            cfg.get("auto_min_relative_improvement", 0.01)
+        ),
         min_thickness=_NM * float(cfg.get("min_thickness_nm", 8.0)),
         mini_batch=mini_batch and method == "adam",
         batch_size=batch_size,
@@ -941,7 +959,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     checkpoint_on_best = bool(cfg.get("checkpoint_on_best", True))
     checkpoint_plot_rt = bool(cfg.get("checkpoint_plot_rt", True))
 
-    print("Text-stack R-target RMSE thickness optimiser")
+    print("Text-stack R-target least-squares optimizer")
     print(f"  stack: {stack_path}")
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
@@ -990,7 +1008,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         for i, (m, d) in enumerate(layers0, 1):
             print(f"    {i:2d}. {m:<10} {d / _NM:8.2f}")
     print(
-        f"  objective: band-normalized RMSE(R→target) "
+        f"  objective: band-normalized MSE(R→target) "
         f"+ thickness_weight={opt.thickness_weight:g}"
     )
     print(f"  n_bands: {len(rbands)}")
@@ -1018,7 +1036,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         incident=incident,
         substrate=substrate,
         nk=nk,
-        film_indices=film_indices,
+        film_indices=None if use_needle else film_indices,
         method=method,
         enabled=checkpoint_on_best,
         plot_rt_live=checkpoint_plot_rt,
@@ -1040,12 +1058,41 @@ def run(stack_path: str, cfg_path: str) -> int:
     )
     print_band_report("Before", layers0, rbands, opt.wavelengths, opt._rt(layers0)[0])
 
-    result = opt.optimize(layers0, free_indices=free_indices, verbose=True)
+    if use_needle:
+        synthesizer = NeedleSynthesizer(
+            opt,
+            high_index=str(cfg.get("high_index", "tio2")),
+            low_index=str(cfg.get("low_index", "sio2")),
+            max_layers=int(cfg.get("max_layers", 32)),
+            max_add_rounds=int(cfg.get("max_add_rounds", 12)),
+            refine_after_add=bool(cfg.get("refine_after_add", True)),
+            n_design_centres=int(cfg.get("n_design_centres", 8)),
+            add_pair=bool(cfg.get("add_pair", False)),
+            candidate_mode=str(cfg.get("needle_candidate_mode", "sensitivity")),
+            deep_search_candidates=int(cfg.get("deep_search_candidates", 3)),
+            needle_probe=_NM * float(cfg.get("needle_probe_nm", 1.0)),
+            prune_threshold=_NM * float(cfg.get("prune_threshold_nm", 10.0)),
+            ar_layers=int(cfg.get("ar_layers", 4)),
+            ar_add_rounds=int(cfg.get("ar_add_rounds", 4)),
+            front_free_extra=int(cfg.get("front_free_extra", 6)),
+        )
+        synthesis = synthesizer.run(layers0, verbose=True)
+        result = synthesis.lm
+        result.layers = list(synthesis.layers)
+        result.cost = opt.cost(result.layers)
+        result.residuals = opt.residuals(result.layers)
+        result.final_layers = list(result.layers)
+        result.final_cost = result.cost
+        result.message = f"needle({synthesis.n_added} added)+{result.message}"
+    else:
+        result = opt.optimize(layers0, free_indices=free_indices, verbose=True)
+    result_film_indices = (
+        film_indices if len(result.layers) == len(film_indices) else None
+    )
     # Selected optimal: cost + thickness-Δ ranking.
     layers_best = result.layers
     layers_final = result.final_layers if result.final_layers is not None else layers_best
-    # Always report the scalar L = RMSE + thickness (Adam already uses this;
-    # LM Gauss–Newton steps on MSE residuals, then we re-evaluate here).
+    # Every method reports and optimizes the same residual least-squares merit.
     best_cost = opt.cost(layers_best)
     final_cost = opt.cost(layers_final)
     best_iter = result.best_iter
@@ -1181,7 +1228,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         layers_best,
         substrate,
         nk,
-        film_indices=film_indices,
+        film_indices=result_film_indices,
         header_lines=[
             f"# best stack (cost+Δ)  method={method}  "
             f"loss={best_cost:.12e}  Δ={best_delta:+.6e}  "
@@ -1198,7 +1245,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         layers_final,
         substrate,
         nk,
-        film_indices=film_indices,
+        film_indices=result_film_indices,
         header_lines=[
             f"# final iterate  method={method}  "
             f"loss={final_cost:.12e}  Δ={final_delta:+.6e}  "
@@ -1214,7 +1261,7 @@ def run(stack_path: str, cfg_path: str) -> int:
         layers_best,
         substrate,
         nk,
-        film_indices=film_indices,
+        film_indices=result_film_indices,
         header_lines=[
             f"# best stack (same as stack_best.txt)  "
             f"loss={best_cost:.12e}  best_iter={best_iter}",
@@ -1238,7 +1285,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             g.layers,
             substrate,
             nk,
-            film_indices=film_indices,
+            film_indices=result_film_indices,
             header_lines=[
                 f"# global-stage stack  method={method}  "
                 f"loss={g.cost:.12e}  msg={g.message}",
@@ -1252,7 +1299,7 @@ def run(stack_path: str, cfg_path: str) -> int:
             layers_best,
             substrate,
             nk,
-            film_indices=film_indices,
+            film_indices=result_film_indices,
             header_lines=[
                 f"# polished stack  method={result.message}  "
                 f"loss={best_cost:.12e}  global_loss={g.cost:.12e}",
@@ -1319,8 +1366,8 @@ def main(argv: list[str] | None = None) -> int:
     configure_matplotlib()
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(
-        description="Adam/LM thickness optimisation of a text-file stack "
-        "for joint reflectance max/min over N wavelength bands."
+        description="Bounded thickness optimization and optional Needle "
+        "synthesis for joint reflectance targets."
     )
     ap.add_argument(
         "stack",
@@ -1332,7 +1379,8 @@ def main(argv: list[str] | None = None) -> int:
         "config",
         nargs="?",
         default=os.path.join(here, "examples", "example_optimize_film.json"),
-        help="JSON with bands[].R_target / objective, method=adam|lm|cg|lbfgs|de|dual_annealing",
+        help="JSON with bands[].R_target / objective; "
+        "method=auto|multistart|trf|adam|lm|cg|lbfgs|de|dual_annealing",
     )
     args = ap.parse_args(argv)
     return run(args.stack, args.config)

@@ -1,6 +1,6 @@
 # 红外反射膜结构优化程序
 
-根据文本膜系文件（固定 n,k）与波段反射率目标，用 **TMM（传输矩阵法）** 计算光谱，以 **Adam / LM / CG / L-BFGS / DE / 模拟退火** 优化各镀膜层厚度（入射介质与基底厚度固定）。
+根据文本膜系文件与波段反射率目标，用 **TMM（传输矩阵法）** 计算光谱。默认采用**多起点 TRF（有界信赖域最小二乘）+ 必要时 DE 全局回退**；也支持 LM、Adam、CG、L-BFGS-B、DE、双退火及灵敏度 Needle 层数合成。
 
 ## 快速开始
 
@@ -30,9 +30,10 @@ sim/.venv/bin/python sim/optimize_film.py \
 
 1. **文本膜系输入**：`index material thickness_nm n k` 格式（见 `plot_rt_txt.py`）
 2. **多波段 R 目标**：每段设 `R_target`（0–1），或 `objective: maximize|minimize`（默认 1 / 0）
-3. **损失**：波段归一化 RMSE（相对各段 `R_target`）+ 可选 `thickness_weight`
-4. **优化方法**：`adam`（默认）、`lm`、`cg`、`lbfgs`、`de`、`dual_annealing`；Adam 支持波长 mini-batch
-5. **绘图**：matplotlib 输出优化前后 R/T、波段着色，以及实际使用的 n,k
+3. **统一损失**：波段归一化 MSE（相对各段 `R_target`）+ 可选 `thickness_weight`；所有算法优化并报告同一数值
+4. **优化方法**：`auto`（默认）、`multistart`、`trf`、`lm`、`adam`、`cg`、`lbfgs`、`de`、`dual_annealing`
+5. **层数合成**：`use_needle: true` 时在各界面探测插层灵敏度，对 top-k 候选局部精修，最后尝试剪除薄层
+6. **绘图**：matplotlib 输出优化前后 R/T、波段着色，以及实际使用的 n,k
 
 ## 目录结构
 
@@ -42,8 +43,8 @@ sim/
   plot_rt_txt.py        # 文本膜系 R/T 计算与绘图
   plot_rt.py            # JSON 膜系 R/T 计算与绘图（含共享绘图工具）
   rt_calculator.py      # TMM / 外部 R/T 接口
-  lm_optimizer.py       # LM / Adam / DE 厚度优化核心
-  needle.py             # 逐层增加法（独立模块，供高级设计使用）
+  lm_optimizer.py       # TRF / LM / Adam / DE 等厚度优化核心
+  needle.py             # 灵敏度插层、Deep Search 候选与剪枝
   tmm.py                # 传输矩阵核心
   dispersion.py         # 材料色散库（n+ik；见 materials/SOURCES.md）
   materials/            # PVD 优先的表列 n,k（SOURCES.md；NK_TABLES_300_1800.md）
@@ -75,7 +76,10 @@ sim/
 ```json
 {
   "n_bands": 3,
-  "method": "adam",
+  "method": "auto",
+  "multistart_method": "trf",
+  "multistart_n": 6,
+  "auto_de_fallback": true,
   "bands": [
     {"wavelength_nm": [420, 700], "objective": "minimize", "R_target": 0.05, "weight": 2.0},
     {"wavelength_nm": [800, 1200], "objective": "maximize", "R_target": 0.95, "weight": 1.5},
@@ -98,7 +102,11 @@ sim/
 
 要点：
 
-- **`method`**：`adam` / `lm` / `cg` / `lbfgs`（需 scipy）/ `de` / `dual_annealing`（后两者需 scipy）
+- **`method`**：`auto` / `multistart` / `trf` / `lm` / `adam` / `cg` / `lbfgs` / `de` / `dual_annealing`
+- **`auto`**：先运行 Latin-hypercube 多起点局部优化；若指标仍未满足或改善低于阈值，再运行 DE，并用局部方法 polish
+- **`multistart_n`** / **`multistart_method`** / **`multistart_seed`**：多起点数量、局部方法（默认 TRF）与随机种子
+- **`auto_de_fallback`** / **`auto_min_relative_improvement`**：控制自动全局回退
+- **`use_needle`**：允许改变层数；相关参数为 `max_layers`、`needle_candidate_mode`、`deep_search_candidates`、`needle_probe_nm`、`prune_threshold_nm`
 - **`cg_initial_step_nm`** / **`cg_max_step_nm`** / **`cg_restart`**：CG 专用（默认分别跟 `adam_lr_nm`、`adam_max_step_nm`、自由层数）
 - **`lbfgs_m`** / **`lbfgs_maxls`**：L-BFGS-B 历史向量数（默认 10）与线搜索最大步数（默认 20）
 - **`R_target`**：写在每个 `bands[]` 上，反射率目标 ∈ [0, 1]；省略时由 `objective` 得到 1（maximize）或 0（minimize）
@@ -122,7 +130,7 @@ sim/.venv/bin/python sim/plot_rt.py sim/examples/example_plot_rt.json
 
 - Python 3.10+（推荐）
 - `matplotlib`（见 `requirements.txt`）
-- `scipy`（可选；`method=de` / `dual_annealing` 需要）
+- `scipy`（默认 TRF、L-BFGS-B、DE 和双退火需要）
 - `cupy`（可选；`use_cuda: true`，仅 NVIDIA CUDA）
 
 既有基线评估仍可无额外依赖：

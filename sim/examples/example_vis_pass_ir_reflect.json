@@ -33,12 +33,16 @@
     }
   ],
   "optimizer": {
-    "method": "adam",
+    "method": "trf",
     "use_needle": true,
     "thickness_weight": 0.01,
     "wavelength_step_nm": 15,
     "max_layers": 36,
     "max_add_rounds": 10,
+    "needle_candidate_mode": "sensitivity",
+    "deep_search_candidates": 3,
+    "needle_probe_nm": 1.0,
+    "prune_threshold_nm": 10.0,
     "n_design_centres": 8,
     "max_iter": 30,
     "high_index": "tio2",

@@ -44,7 +44,7 @@
     "de_recombination": 0.7,
     "global_seed": 0,
     "global_polish": true,
-    "global_polish_method": "lm",
+    "global_polish_method": "trf",
     "checkpoint_on_best": true,
     "checkpoint_local_every": 5,
     "fd_step_nm": 1.0,

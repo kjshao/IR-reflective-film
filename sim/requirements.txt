@@ -1,6 +1,6 @@
-# Optional dependencies for sim/optimize_film.py
+# Runtime dependencies for sim/optimize_film.py
 matplotlib>=3.5
-# Global / quasi-Newton thickness methods: method=lbfgs | de | dual_annealing
+# Default TRF/auto pipeline plus L-BFGS-B, DE and dual annealing.
 scipy>=1.9
 # Optional GPU TMM (NVIDIA CUDA only): use_cuda true / rt_engine=tmm_cuda
 # Install a wheel that matches your CUDA toolkit, e.g.:

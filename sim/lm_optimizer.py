@@ -122,7 +122,7 @@ def resolve_global_polish_method(
     *,
     global_polish_lm: bool | None = None,
 ) -> str:
-    """Return ``none`` | ``lm`` | ``adam`` | ``cg`` | ``lbfgs`` for polish."""
+    """Return the canonical local method used after a global search."""
     if method is not None and str(method).strip() != "":
         m = str(method).lower().strip()
         aliases = {
@@ -142,11 +142,14 @@ def resolve_global_polish_method(
             "l-bfgs": "lbfgs",
             "lbfgsb": "lbfgs",
             "l-bfgs-b": "lbfgs",
+            "trf": "trf",
+            "least_squares": "trf",
+            "least-squares": "trf",
         }
         if m not in aliases:
             raise ValueError(
                 f"unknown global_polish_method {method!r}; "
-                "use none|lm|adam|cg|lbfgs"
+                "use none|lm|adam|cg|lbfgs|trf"
             )
         return aliases[m]
     if global_polish_lm:
@@ -227,19 +230,6 @@ def build_epoch_wavelength_batches(
     return out
 
 
-# Per-sample pull toward total reflection (R → 1, T → 0).
-_DRIVE_SCALE = 0.5
-# In-band peak-to-peak (max − min); damps visible ripple vs a wider IR stop.
-_RIPPLE_SCALE = 1.5
-
-
-def _infer_targets(b: BandSpec) -> tuple[float, float]:
-    """High-reflector defaults: R_target=1, T_target=0."""
-    r_t = 1.0 if b.R_target is None else b.R_target
-    t_t = 0.0 if b.T_target is None else b.T_target
-    return r_t, t_t
-
-
 def build_residuals(
     layers: Sequence[tuple[str, float]],
     bands: Sequence[BandSpec],
@@ -250,48 +240,50 @@ def build_residuals(
     thickness_weight: float = 0.02,
     thickness_ref: float = 1000e-9,
 ) -> list[float]:
-    """Residuals for broadband total reflection (visible + infrared).
+    """Return a fixed-length, band-normalized residual vector.
 
-    Every band is a high reflector. Per-sample terms are scaled by
-    ``1/sqrt(n)`` so a wider IR grid cannot drown the visible band.
-    A peak-to-peak ripple term flattens in-band oscillation.
+    All four inequality directions are supported.  Targets are optional and
+    never inferred: a pass band must not silently become a high-reflector
+    objective.  Keeping the vector length independent of feasibility is
+    required by Gauss--Newton/TRF Jacobians.
     """
-    ineq: list[float] = []
-    drive: list[float] = []
+    residuals: list[float] = []
+    active = []
     for b in bands:
-        w = math.sqrt(max(b.weight, 0.0))
-        r_t, t_t = _infer_targets(b)
-        rs, ts = [], []
-        for wl, r, t in zip(wavelengths, R, T):
-            if b.wl_lo - 1e-15 <= wl <= b.wl_hi + 1e-15:
-                rs.append(r)
-                ts.append(t)
-        if not rs:
-            continue
-        wn = w / math.sqrt(len(rs))
-        for r, t in zip(rs, ts):
-            if b.R_min is not None:
-                ineq.append(wn * max(0.0, b.R_min - r))
-            if b.T_max is not None:
-                ineq.append(wn * max(0.0, t - b.T_max))
-            drive.append(_DRIVE_SCALE * wn * max(0.0, r_t - r))
-            drive.append(_DRIVE_SCALE * wn * max(0.0, t - t_t))
-        if b.R_min is not None:
-            ineq.append(2.0 * w * max(0.0, b.R_min - min(rs)))
-            ineq.append(0.8 * w * max(0.0, (b.R_min + 0.08) - min(rs)))
-        if b.T_max is not None:
-            ineq.append(1.5 * w * max(0.0, max(ts) - b.T_max))
-        drive.append(_RIPPLE_SCALE * w * (max(rs) - min(rs)))
-        drive.append(_RIPPLE_SCALE * w * (max(ts) - min(ts)))
+        samples = [
+            (r, t)
+            for wl, r, t in zip(wavelengths, R, T)
+            if b.wl_lo - 1e-15 <= wl <= b.wl_hi + 1e-15
+        ]
+        if samples and b.weight > 0.0:
+            active.append((b, samples))
 
-    feasible = all(abs(v) <= 1e-12 for v in ineq)
-    res = ineq + drive
-    if feasible and thickness_weight > 0 and layers:
+    weight_sum = sum(float(b.weight) for b, _ in active)
+    for b, samples in active:
+        if weight_sum <= 0.0:
+            continue
+        # 0.5 * sum(residual**2) is a weighted mean-square merit.
+        scale = math.sqrt(2.0 * float(b.weight) / (weight_sum * len(samples)))
+        for r, t in samples:
+            if b.R_min is not None:
+                residuals.append(scale * max(0.0, b.R_min - r))
+            if b.R_max is not None:
+                residuals.append(scale * max(0.0, r - b.R_max))
+            if b.T_min is not None:
+                residuals.append(scale * max(0.0, b.T_min - t))
+            if b.T_max is not None:
+                residuals.append(scale * max(0.0, t - b.T_max))
+            if b.R_target is not None:
+                residuals.append(scale * (r - b.R_target))
+            if b.T_target is not None:
+                residuals.append(scale * (t - b.T_target))
+
+    if thickness_weight > 0 and layers:
         total = sum(d for _, d in layers)
-        res.append(math.sqrt(thickness_weight) * total / thickness_ref)
-    if not res:
-        res = [0.0]
-    return res
+        residuals.append(
+            math.sqrt(2.0 * thickness_weight) * total / thickness_ref
+        )
+    return residuals or [0.0]
 
 
 def specs_satisfied(
@@ -370,7 +362,8 @@ def _require_scipy():
         import scipy.optimize as spo
     except ImportError as exc:
         raise SystemExit(
-            "scipy is required for 'lbfgs', 'de', and 'dual_annealing'; "
+            "scipy is required for 'auto', 'multistart', 'trf', 'lbfgs', "
+            "'de', and 'dual_annealing'; "
             "pip install scipy"
         ) from exc
     return spo
@@ -397,7 +390,7 @@ class LMThicknessOptimizer:
         lambda0: float = 1e-2,
         max_iter: int = 40,
         tol: float = 1e-8,
-        method: str = "lm",
+        method: str = "trf",
         adam_lr: float = 2e-9,
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.999,
@@ -410,6 +403,14 @@ class LMThicknessOptimizer:
         # L-BFGS-B (scipy) on scalar cost with thickness bounds.
         lbfgs_m: int = 10,
         lbfgs_maxls: int = 20,
+        # Bounded scipy trust-region reflective least squares.
+        trf_x_scale: str | float = "jac",
+        # Multi-start local search and optional automatic DE fallback.
+        multistart_n: int = 8,
+        multistart_method: str = "trf",
+        multistart_seed: int | None = 0,
+        auto_de_fallback: bool = True,
+        auto_min_relative_improvement: float = 0.01,
         # Mini-batch Adam (wavelength subsets). Off by default → full-grid Adam.
         mini_batch: bool = False,
         batch_size: int = 8,
@@ -467,6 +468,14 @@ class LMThicknessOptimizer:
         self.cg_restart = None if cg_restart is None else max(1, int(cg_restart))
         self.lbfgs_m = max(1, int(lbfgs_m))
         self.lbfgs_maxls = max(1, int(lbfgs_maxls))
+        self.trf_x_scale = trf_x_scale
+        self.multistart_n = max(1, int(multistart_n))
+        self.multistart_method = str(multistart_method).lower().strip()
+        self.multistart_seed = multistart_seed
+        self.auto_de_fallback = bool(auto_de_fallback)
+        self.auto_min_relative_improvement = max(
+            0.0, float(auto_min_relative_improvement)
+        )
         self.min_thickness = float(min_thickness)
         self.mini_batch = bool(mini_batch)
         self.batch_size = int(batch_size)
@@ -820,6 +829,18 @@ class LMThicknessOptimizer:
         # Allow the first point of this run to be checkpointed even if a prior
         # optimize() call already notified a similar cost.
         self._last_notified_cost = None
+        if self.method in ("auto", "hybrid"):
+            return self._optimize_auto(
+                layers, free_indices=free_indices, verbose=verbose
+            )
+        if self.method in ("multistart", "multi_start", "multi-start"):
+            return self._optimize_multistart(
+                layers, free_indices=free_indices, verbose=verbose
+            )
+        if self.method in ("trf", "least_squares", "least-squares"):
+            return self._optimize_trf(
+                layers, free_indices=free_indices, verbose=verbose
+            )
         if self.method == "adam":
             if self.mini_batch:
                 return self._optimize_adam_minibatch(
@@ -858,9 +879,298 @@ class LMThicknessOptimizer:
         if self.method not in ("lm", "levenberg", "levenberg-marquardt"):
             raise ValueError(
                 f"unknown optimizer method {self.method!r}; "
-                "use 'lm', 'adam', 'cg', 'lbfgs', 'de', or 'dual_annealing'"
+                "use 'auto', 'multistart', 'trf', 'lm', 'adam', 'cg', "
+                "'lbfgs', 'de', or 'dual_annealing'"
             )
         return self._optimize_lm(layers, free_indices=free_indices, verbose=verbose)
+
+    def _optimize_trf(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        """Bounded trust-region reflective least squares.
+
+        scipy receives thicknesses in nanometres rather than metres.  This
+        keeps finite differences, trust-region radii and stopping tolerances
+        on a well-conditioned numerical scale.
+        """
+        spo = _require_scipy()
+        materials = [m for m, _ in layers]
+        x0 = self._project(materials, [d for _, d in layers])
+        free = list(range(len(x0))) if free_indices is None else list(free_indices)
+        layers0 = list(zip(materials, x0))
+        start_r = self.residuals(layers0)
+        start_cost = 0.5 * sum(v * v for v in start_r)
+        if not free:
+            return self._make_result(
+                best_layers=layers0,
+                best_cost=start_cost,
+                best_r=start_r,
+                n_iter=0,
+                success=False,
+                message="no_free",
+                history=[start_cost],
+                best_iter=0,
+                final_layers=layers0,
+                final_cost=start_cost,
+                start_cost=start_cost,
+            )
+
+        scale = 1e9
+        y0 = [x0[j] * scale for j in free]
+        lo = [_bounds_for(materials[j], self.min_thickness)[0] * scale for j in free]
+        hi = [_bounds_for(materials[j], self.min_thickness)[1] * scale for j in free]
+
+        def unpack(y: Sequence[float]) -> list[float]:
+            x = list(x0)
+            for value, j in zip(y, free):
+                x[j] = float(value) / scale
+            return self._project(materials, x)
+
+        n_eval = 0
+
+        def fun(y):
+            nonlocal n_eval
+            n_eval += 1
+            return self.residuals(list(zip(materials, unpack(y))))
+
+        def jac(y):
+            nonlocal n_eval
+            x = unpack(y)
+            r0 = self.residuals(list(zip(materials, x)))
+            full_j, free_cols = self._jacobian(materials, x, r0, free)
+            n_eval += len(free_cols)
+            # _jacobian differentiates with respect to metres; y is in nm.
+            return [[row[j] / scale for j in free_cols] for row in full_j]
+
+        if verbose:
+            print(
+                f"    TRF start: cost={start_cost:.6e}  layers={len(materials)}  "
+                f"free={len(free)}  x_scale={self.trf_x_scale}",
+                flush=True,
+            )
+        self._begin_run(x0, start_cost)
+        self._notify_best(layers0, start_cost, stage="trf_start", iter=0)
+        result = spo.least_squares(
+            fun,
+            y0,
+            bounds=(lo, hi),
+            method="trf",
+            jac=jac,
+            x_scale=self.trf_x_scale,
+            ftol=max(self.tol, 1e-12),
+            xtol=max(self.tol, 1e-12),
+            gtol=max(self.tol, 1e-12),
+            max_nfev=max(20, self.max_iter * (len(free) + 1)),
+        )
+        x_final = unpack(result.x)
+        layers_final = list(zip(materials, x_final))
+        final_r = self.residuals(layers_final)
+        final_cost = 0.5 * sum(v * v for v in final_r)
+        if final_cost < start_cost:
+            best_layers, best_cost, best_r, best_iter = (
+                layers_final,
+                final_cost,
+                final_r,
+                1,
+            )
+            self._notify_best(
+                best_layers,
+                best_cost,
+                stage="trf",
+                iter=int(getattr(result, "nfev", n_eval)),
+                n_eval=n_eval,
+                n_improve=1,
+            )
+        else:
+            best_layers, best_cost, best_r, best_iter = (
+                layers0,
+                start_cost,
+                start_r,
+                0,
+            )
+        if verbose:
+            print(
+                f"    TRF done: best={best_cost:.6e}  "
+                f"Δ={best_cost-start_cost:+.3e}  nfev={n_eval}  "
+                f"status={getattr(result, 'status', 0)}",
+                flush=True,
+            )
+        return self._make_result(
+            best_layers=best_layers,
+            best_cost=best_cost,
+            best_r=best_r,
+            n_iter=int(getattr(result, "nfev", n_eval)),
+            success=bool(result.success) or best_cost < start_cost,
+            message=str(result.message),
+            history=[start_cost, final_cost],
+            best_iter=best_iter,
+            final_layers=layers_final,
+            final_cost=final_cost,
+            start_cost=start_cost,
+        )
+
+    def _optimize_multistart(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        """Latin-hypercube multi-start followed by a bounded local method."""
+        materials = [m for m, _ in layers]
+        x0 = self._project(materials, [d for _, d in layers])
+        free = list(range(len(x0))) if free_indices is None else list(free_indices)
+        if not free:
+            return self._optimize_trf(
+                layers, free_indices=free_indices, verbose=verbose
+            )
+        local = self.multistart_method
+        if local not in ("trf", "lbfgs", "lm", "cg"):
+            raise ValueError(
+                f"multistart_method must be trf|lbfgs|lm|cg, got {local!r}"
+            )
+
+        rng = random.Random(self.multistart_seed)
+        starts = [list(x0)]
+        n_random = self.multistart_n - 1
+        bins = list(range(n_random))
+        per_dim_bins: dict[int, list[int]] = {}
+        for j in free:
+            shuffled = list(bins)
+            rng.shuffle(shuffled)
+            per_dim_bins[j] = shuffled
+        for i in range(n_random):
+            x = list(x0)
+            for j in free:
+                lo, hi = _bounds_for(materials[j], self.min_thickness)
+                u = (per_dim_bins[j][i] + rng.random()) / max(1, n_random)
+                x[j] = lo + u * (hi - lo)
+            starts.append(x)
+
+        original_method = self.method
+        original_callback = self.on_best
+        self.on_best = None
+        results: list[OptimResult] = []
+        try:
+            for i, start in enumerate(starts, 1):
+                self.method = local
+                if verbose:
+                    print(
+                        f"    multistart {i}/{len(starts)}: local={local}",
+                        flush=True,
+                    )
+                results.append(
+                    self.optimize(
+                        list(zip(materials, start)),
+                        free_indices=free,
+                        verbose=False,
+                    )
+                )
+        finally:
+            self.method = original_method
+            self.on_best = original_callback
+
+        best = results[0]
+        for candidate in results[1:]:
+            if is_better_checkpoint(
+                candidate.cost,
+                [d for _, d in candidate.layers],
+                best.cost,
+                [d for _, d in best.layers],
+                x0,
+                delta_weight=self.checkpoint_delta_weight,
+            ):
+                best = candidate
+        start_cost = self.cost(list(zip(materials, x0)))
+        history = [start_cost] + [r.cost for r in results]
+        self._begin_run(x0, start_cost)
+        self._notify_best(
+            best.layers,
+            best.cost,
+            stage=f"multistart_{local}",
+            iter=results.index(best) + 1,
+            n_eval=sum(r.n_iter for r in results),
+            n_improve=sum(r.cost < r.start_cost for r in results),
+            force=True,
+        )
+        if verbose:
+            print(
+                f"    multistart done: starts={len(starts)}  "
+                f"best={best.cost:.6e}  Δ={best.cost-start_cost:+.3e}",
+                flush=True,
+            )
+        return self._make_result(
+            best_layers=best.layers,
+            best_cost=best.cost,
+            best_r=best.residuals,
+            n_iter=sum(r.n_iter for r in results),
+            success=best.cost < start_cost,
+            message=f"multistart({local}, n={len(starts)})",
+            history=history,
+            best_iter=history.index(min(history)),
+            final_layers=best.final_layers or best.layers,
+            final_cost=best.final_cost if best.final_cost is not None else best.cost,
+            start_cost=start_cost,
+        )
+
+    def _optimize_auto(
+        self,
+        layers: Sequence[tuple[str, float]],
+        *,
+        free_indices: Sequence[int] | None = None,
+        verbose: bool = True,
+    ) -> OptimResult:
+        """Multi-start local optimization with DE fallback when still poor."""
+        start_cost = self.cost(layers)
+        local = self._optimize_multistart(
+            layers, free_indices=free_indices, verbose=verbose
+        )
+        _, _, specs_ok, _ = self.evaluate(local.layers)
+        relative = (start_cost - local.cost) / max(abs(start_cost), 1e-15)
+        if (
+            not self.auto_de_fallback
+            or (specs_ok and relative >= self.auto_min_relative_improvement)
+        ):
+            local.message = f"auto:{local.message}"
+            return local
+
+        if verbose:
+            print(
+                f"    auto fallback: specs_ok={specs_ok}  "
+                f"relative_improvement={relative:.3%}; running DE",
+                flush=True,
+            )
+        saved_method = self.method
+        saved_polish = self.global_polish_method
+        try:
+            self.method = "de"
+            self.global_polish_method = self.multistart_method
+            global_result = self._optimize_differential_evolution(
+                local.layers, free_indices=free_indices, verbose=verbose
+            )
+        finally:
+            self.method = saved_method
+            self.global_polish_method = saved_polish
+
+        x0 = [d for _, d in layers]
+        if is_better_checkpoint(
+            global_result.cost,
+            [d for _, d in global_result.layers],
+            local.cost,
+            [d for _, d in local.layers],
+            x0,
+            delta_weight=self.checkpoint_delta_weight,
+        ):
+            winner = global_result
+        else:
+            winner = local
+        winner.message = f"auto:{local.message}+de->{winner.message}"
+        winner.start_cost = start_cost
+        return winner
 
     def _global_objective_setup(
         self,
@@ -1025,6 +1335,10 @@ class LMThicknessOptimizer:
             )
         elif polish == "lbfgs":
             polished = self._optimize_lbfgs(
+                layers, free_indices=free_indices, verbose=verbose
+            )
+        elif polish == "trf":
+            polished = self._optimize_trf(
                 layers, free_indices=free_indices, verbose=verbose
             )
         else:
