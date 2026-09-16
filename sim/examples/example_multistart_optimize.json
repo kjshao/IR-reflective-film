@@ -45,6 +45,7 @@
   "wavelength_step_nm": 15,
   "fd_step_nm": 0.5,
   "min_thickness_nm": 8,
+  "max_total_thickness_nm": 1800,
   "thickness_bounds_nm": {
     "tio2": [8, 500],
     "sio2": [8, 550]
