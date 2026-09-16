@@ -120,8 +120,8 @@ sim/
 - **`multistart_candidate_n`** / **`surrogate_pool_n`**：Extra Trees 的真实 loss 预筛选数量（默认 256）和代理候选池数量（默认 10000）
 - **`surrogate_trees`** / **`surrogate_exploration_beta`** / **`surrogate_diversity_weight`**：树数量、LCB 探索强度和起点距离多样性权重
 - **`multistart_final_polish_method`**：对多起点最优结果进行最终精修；推荐 `trf`
-- **`multistart_gpu_ids`**：例如 `[0, 1, 2, 3]`；启用多个独立进程并将每个进程固定到一块 GPU，要求同时设置 `use_cuda: true`
-- **`multistart_progress_interval_s`**：多 GPU 任务尚未完成时的进度心跳间隔，默认 `10` 秒
+- **`gpu_ids`**：例如 `[0, 1, 2, 3]`；指定 CUDA 设备，要求 `use_cuda: true`；省略时自动使用所有可见 GPU（旧键 `multistart_gpu_ids` 仍兼容）
+- **`multistart_progress_interval_s`**：Surrogate 各阶段及多 GPU 任务的进度心跳间隔，默认 `10` 秒
 - **`auto_de_fallback`** / **`auto_min_relative_improvement`**：控制自动全局回退
 - **`use_needle`**：允许改变层数；相关参数为 `max_layers`、`needle_candidate_mode`、`deep_search_candidates`、`needle_probe_nm`、`prune_threshold_nm`
 - **`cg_initial_step_nm`** / **`cg_max_step_nm`** / **`cg_restart`**：CG 专用（默认分别跟 `adam_lr_nm`、`adam_max_step_nm`、自由层数）
@@ -134,7 +134,7 @@ sim/
 - **`multistart_sampling_bounds_nm`**：设置 LHS/Sobol/Extra Trees 候选的初值采样范围；必须位于对应的 `thickness_bounds_nm` 之内，未列出的材料沿用厚度硬边界
 - **`mini_batch`**：`true` 或嵌套对象 `{"batch_size", "n_batches", "n_epochs", "shuffle_seed"}`；在 `method=adam` 或 `multistart_method=adam` 时生效
 - **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.txt`，并追加 `best_updates.csv`
-- **`use_cuda`**：`true` 时走 CuPy 批量 TMM（仅 NVIDIA CUDA；macOS 不可用）
+- **`use_cuda`**：`true` 时走 CuPy 批量 TMM，并在多 GPU 上并行 Surrogate 真实 loss 预筛选和局部优化有限差分；Multistart 起点仍按每卡一个进程并行（仅 NVIDIA CUDA；macOS 不可用）
 
 多 GPU 并行 Multistart：
 
@@ -144,7 +144,7 @@ sim/
   "multistart_n": 8,
   "multistart_method": "trf",
   "use_cuda": true,
-  "multistart_gpu_ids": [0, 1, 2, 3],
+  "gpu_ids": [0, 1, 2, 3],
   "multistart_progress_interval_s": 10
 }
 ```

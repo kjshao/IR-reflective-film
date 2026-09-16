@@ -720,6 +720,7 @@ python3 sim/optimize_film.py \
 | `multistart_candidate_n` | 256 | Extra Trees 训练前计算真实 loss 的 Sobol 候选数 |
 | `surrogate_pool_n` | 10000 | 代理模型用于挑选起点的候选池大小 |
 | `multistart_sampling_bounds_nm` | 按设计设定 | 限制 LHS/Sobol/Extra Trees 候选采样；局部优化仍使用厚度硬边界 |
+| `gpu_ids` | 所有可见 GPU | 多 GPU 并行 Surrogate 真实 loss、有限差分和 Multistart；省略时自动检测 |
 | `auto_min_relative_improvement` | 0.01 | 触发 DE 回退的最小相对改善 |
 | `min_thickness_nm` | 8（默认） | 单层最小厚度（nm）；抬高优化厚度下界 |
 | `max_total_thickness_nm` | 按工艺设定 | 所有膜层总厚度硬上限；候选点超限时投影回可行域 |

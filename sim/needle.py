@@ -648,7 +648,10 @@ def make_optimizer_from_config(
         multistart_final_polish_method=cfg.get(
             "multistart_final_polish_method"
         ),
-        multistart_gpu_ids=cfg.get("multistart_gpu_ids"),
+        multistart_gpu_ids=cfg.get(
+            "gpu_ids",
+            cfg.get("multistart_gpu_ids"),
+        ),
         multistart_progress_interval_s=float(
             cfg.get("multistart_progress_interval_s", 10.0)
         ),

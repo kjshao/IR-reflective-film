@@ -874,7 +874,11 @@ def run(stack_path: str, cfg_path: str) -> int:
         )
 
     use_cuda = bool(cfg.get("use_cuda", False))
-    raw_gpu_ids = cfg.get("multistart_gpu_ids")
+    raw_gpu_ids = (
+        cfg.get("gpu_ids")
+        if "gpu_ids" in cfg
+        else cfg.get("multistart_gpu_ids")
+    )
     if raw_gpu_ids is None:
         multistart_gpu_ids: list[int] = []
     else:
@@ -882,15 +886,17 @@ def run(stack_path: str, cfg_path: str) -> int:
             isinstance(value, bool) or not isinstance(value, int)
             for value in raw_gpu_ids
         ):
-            raise ValueError("multistart_gpu_ids must be a JSON array of GPU IDs")
+            raise ValueError("gpu_ids must be a JSON array of GPU IDs")
         multistart_gpu_ids = list(raw_gpu_ids)
-    if multistart_gpu_ids and not use_cuda:
-        raise ValueError("multistart_gpu_ids requires use_cuda=true")
-    if multistart_gpu_ids:
+    if not use_cuda and multistart_gpu_ids:
+        raise ValueError("gpu_ids requires use_cuda=true")
+    if use_cuda:
         import tmm_cuda
 
         cp = tmm_cuda.require_cupy()
         device_count = int(cp.cuda.runtime.getDeviceCount())
+        if raw_gpu_ids is None:
+            multistart_gpu_ids = list(range(device_count))
         invalid_ids = [
             device for device in multistart_gpu_ids
             if device < 0 or device >= device_count
@@ -900,6 +906,8 @@ def run(stack_path: str, cfg_path: str) -> int:
                 f"invalid CUDA device IDs {invalid_ids}; "
                 f"available IDs are 0..{device_count - 1}"
             )
+        if multistart_gpu_ids:
+            cp.cuda.Device(multistart_gpu_ids[0]).use()
     if nk_source == "fixed":
         calc = ConstantNkCalculator(nk, use_cuda=use_cuda)
     else:
@@ -1054,7 +1062,7 @@ def run(stack_path: str, cfg_path: str) -> int:
     if use_cuda:
         print("  use_cuda: True (CuPy wavelength-batched TMM)")
     if multistart_gpu_ids:
-        print(f"  multistart_gpu_ids: {multistart_gpu_ids}")
+        print(f"  gpu_ids: {multistart_gpu_ids}")
     if checkpoint_on_best:
         print(f"  checkpoint_on_best: {os.path.join(out_dir, 'stack_best.txt')}")
     if opt.mini_batch:

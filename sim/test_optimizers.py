@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 from lm_optimizer import (
     BandSpec,
@@ -227,11 +229,18 @@ class TRFTests(unittest.TestCase):
                 {"x": [100, 300]}
             ),
         )
-        starts = optimizer._generate_multistart_starts(
-            ["x"], [120e-9], [0], verbose=False
-        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            starts = optimizer._generate_multistart_starts(
+                ["x"], [120e-9], [0], verbose=True
+            )
         self.assertEqual(len(starts), 4)
         self.assertEqual(starts[0], [120e-9])
+        log = output.getvalue()
+        self.assertIn("surrogate prescreen (real TMM loss): started", log)
+        self.assertIn("surrogate training (10 Extra Trees): completed", log)
+        self.assertIn("surrogate inference (pool=32): completed", log)
+        self.assertIn("surrogate batch selection (n=3): completed", log)
 
     def test_invalid_json_thickness_bounds_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "min_nm < max_nm"):

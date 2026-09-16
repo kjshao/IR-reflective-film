@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import multiprocessing
 import random
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
@@ -16,6 +19,52 @@ from rt_calculator import RTCalculator
 _MULTISTART_WORKER_OPTIMIZER = None
 _MULTISTART_WORKER_FREE: list[int] | None = None
 _MULTISTART_WORKER_DEVICE: int | None = None
+
+
+@contextmanager
+def _progress_heartbeat(
+    label: str,
+    *,
+    interval_s: float,
+    enabled: bool,
+    progress: dict | None = None,
+):
+    """Print time-based progress while a blocking stage is running."""
+    started_at = time.monotonic()
+    stop = threading.Event()
+
+    def report() -> None:
+        while not stop.wait(interval_s):
+            elapsed = time.monotonic() - started_at
+            count = ""
+            if progress is not None:
+                count = (
+                    f"  {int(progress.get('done', 0))}/"
+                    f"{int(progress.get('total', 0))}"
+                )
+            print(
+                f"    {label}: running{count}  elapsed={elapsed:.0f}s",
+                flush=True,
+            )
+
+    thread = None
+    if enabled:
+        print(f"    {label}: started", flush=True)
+        thread = threading.Thread(target=report, daemon=True)
+        thread.start()
+    status = "completed"
+    try:
+        yield
+    except BaseException:
+        status = "failed"
+        raise
+    finally:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=max(1.0, interval_s))
+        if enabled:
+            elapsed = time.monotonic() - started_at
+            print(f"    {label}: {status}  elapsed={elapsed:.1f}s", flush=True)
 
 
 def _init_multistart_gpu_worker(optimizer, free, device_queue) -> None:
@@ -28,6 +77,8 @@ def _init_multistart_gpu_worker(optimizer, free, device_queue) -> None:
     global _MULTISTART_WORKER_FREE
     global _MULTISTART_WORKER_DEVICE
     _MULTISTART_WORKER_OPTIMIZER = optimizer
+    optimizer.multistart_gpu_ids = []
+    optimizer._inside_gpu_worker = True
     _MULTISTART_WORKER_FREE = list(free)
     _MULTISTART_WORKER_DEVICE = device_id
 
@@ -54,6 +105,22 @@ def _run_multistart_gpu_worker(job):
         flush=True,
     )
     return index, device_id, result
+
+
+def _run_gpu_evaluation_worker(job):
+    """Evaluate one loss or residual vector on this worker's bound GPU."""
+    index, operation, layers, wavelengths = job
+    optimizer = _MULTISTART_WORKER_OPTIMIZER
+    if optimizer is None:
+        raise RuntimeError("GPU evaluation worker was not initialized")
+    optimizer._set_wavelengths(wavelengths)
+    if operation == "cost":
+        value = optimizer.cost(layers)
+    elif operation == "residuals":
+        value = optimizer.residuals(layers)
+    else:
+        raise ValueError(f"unknown GPU evaluation operation {operation!r}")
+    return index, value
 
 # Default physical bounds for dielectric layers (metres).
 DEFAULT_BOUNDS = {
@@ -671,6 +738,8 @@ class LMThicknessOptimizer:
         self._last_notified_cost: float | None = None
         self._run_start_cost: float | None = None
         self._run_start_x: list[float] | None = None
+        self._inside_gpu_worker = False
+        self._gpu_eval_executor = None
 
     def _begin_run(self, x0: Sequence[float], start_cost: float) -> None:
         """Remember the run start for progress-only Δ logging."""
@@ -768,6 +837,69 @@ class LMThicknessOptimizer:
             return True
         every = self.checkpoint_local_every
         return step > 0 and step % every == 0
+
+    @contextmanager
+    def _gpu_evaluation_pool(
+        self,
+        free_indices: Sequence[int] | None,
+        *,
+        verbose: bool = False,
+    ):
+        """Keep one evaluation process per GPU alive for a local run."""
+        if (
+            len(self.multistart_gpu_ids) < 2
+            or self._inside_gpu_worker
+            or self._gpu_eval_executor is not None
+        ):
+            yield
+            return
+        gpu_ids = list(self.multistart_gpu_ids)
+        ctx = multiprocessing.get_context("spawn")
+        device_queue = ctx.Queue()
+        for device_id in gpu_ids:
+            device_queue.put(device_id)
+        worker_optimizer = copy.copy(self)
+        worker_optimizer.on_best = None
+        worker_optimizer.multistart_gpu_ids = []
+        worker_optimizer._inside_gpu_worker = True
+        worker_optimizer._gpu_eval_executor = None
+        if verbose:
+            print(
+                f"    GPU evaluation pool: started  gpus={gpu_ids}",
+                flush=True,
+            )
+        try:
+            with ProcessPoolExecutor(
+                max_workers=len(gpu_ids),
+                mp_context=ctx,
+                initializer=_init_multistart_gpu_worker,
+                initargs=(worker_optimizer, free_indices or [], device_queue),
+            ) as executor:
+                self._gpu_eval_executor = executor
+                yield
+        finally:
+            self._gpu_eval_executor = None
+            device_queue.close()
+            if verbose:
+                print("    GPU evaluation pool: stopped", flush=True)
+
+    def _gpu_evaluate_many(
+        self,
+        operation: str,
+        layers_batch: Sequence[Sequence[tuple[str, float]]],
+    ):
+        executor = self._gpu_eval_executor
+        if executor is None or len(layers_batch) < 2:
+            if operation == "cost":
+                return [self.cost(layers) for layers in layers_batch]
+            return [self.residuals(layers) for layers in layers_batch]
+        jobs = [
+            (i, operation, list(layers), list(self.wavelengths))
+            for i, layers in enumerate(layers_batch)
+        ]
+        indexed = list(executor.map(_run_gpu_evaluation_worker, jobs))
+        indexed.sort(key=lambda item: item[0])
+        return [value for _, value in indexed]
 
     def _rt(self, layers: Sequence[tuple[str, float]]):
         return self.calc.spectrum(
@@ -877,6 +1009,7 @@ class LMThicknessOptimizer:
         m = len(r0)
         free = list(range(n)) if free_indices is None else list(free_indices)
         J = [[0.0] * n for _ in range(m)]
+        perturbations = []
         for j in free:
             step = self.fd_step
             lo, hi = self.bounds_for(materials[j])
@@ -889,7 +1022,12 @@ class LMThicknessOptimizer:
             denom = xp[j] - x[j]
             if abs(denom) <= 1e-30:
                 continue
-            rp = self.residuals(list(zip(materials, xp)))
+            perturbations.append((j, denom, list(zip(materials, xp))))
+        residual_batches = self._gpu_evaluate_many(
+            "residuals",
+            [layers for _, _, layers in perturbations],
+        )
+        for (j, denom, _layers), rp in zip(perturbations, residual_batches):
             for i in range(m):
                 J[i][j] = (rp[i] - r0[i]) / denom
         return J, free
@@ -1012,6 +1150,7 @@ class LMThicknessOptimizer:
         n = len(x)
         free = list(range(n)) if free_indices is None else list(free_indices)
         g = [0.0] * n
+        perturbations = []
         for j in free:
             step = self.fd_step
             lo, hi = self.bounds_for(materials[j])
@@ -1024,7 +1163,12 @@ class LMThicknessOptimizer:
             denom = xp[j] - x[j]
             if abs(denom) <= 1e-30:
                 continue
-            cp = self.cost(list(zip(materials, xp)))
+            perturbations.append((j, denom, list(zip(materials, xp))))
+        costs = self._gpu_evaluate_many(
+            "cost",
+            [layers for _, _, layers in perturbations],
+        )
+        for (j, denom, _layers), cp in zip(perturbations, costs):
             g[j] = (cp - c0) / denom
         return g, free
 
@@ -1038,6 +1182,38 @@ class LMThicknessOptimizer:
         # Allow the first point of this run to be checkpointed even if a prior
         # optimize() call already notified a similar cost.
         self._last_notified_cost = None
+        local_methods = {
+            "trf",
+            "least_squares",
+            "least-squares",
+            "lm",
+            "levenberg",
+            "levenberg-marquardt",
+            "adam",
+            "cg",
+            "conjugate_gradient",
+            "conjugate-gradient",
+            "ncg",
+            "lbfgs",
+            "l-bfgs",
+            "lbfgsb",
+            "l-bfgs-b",
+        }
+        if (
+            self.method in local_methods
+            and len(self.multistart_gpu_ids) > 1
+            and not self._inside_gpu_worker
+            and self._gpu_eval_executor is None
+        ):
+            with self._gpu_evaluation_pool(
+                free_indices,
+                verbose=verbose,
+            ):
+                return self.optimize(
+                    layers,
+                    free_indices=free_indices,
+                    verbose=verbose,
+                )
         if self.method in ("auto", "hybrid"):
             return self._optimize_auto(
                 layers, free_indices=free_indices, verbose=verbose
@@ -1319,72 +1495,115 @@ class LMThicknessOptimizer:
         ]
         train_y = []
         report_every = max(1, candidate_n // 10)
-        for i, start in enumerate(train_starts, 1):
-            train_y.append(self.cost(list(zip(materials, start))))
-            if verbose and (i == 1 or i % report_every == 0 or i == candidate_n):
-                print(
-                    f"    surrogate prescreen: {i}/{candidate_n}  "
-                    f"best={min(train_y):.6e}",
-                    flush=True,
-                )
+        prescreen_progress = {"done": 0, "total": candidate_n}
+        chunk_size = max(1, 2 * len(self.multistart_gpu_ids))
+        with self._gpu_evaluation_pool(free, verbose=verbose):
+            with _progress_heartbeat(
+                "surrogate prescreen (real TMM loss)",
+                interval_s=self.multistart_progress_interval_s,
+                enabled=verbose,
+                progress=prescreen_progress,
+            ):
+                for offset in range(0, candidate_n, chunk_size):
+                    chunk = train_starts[offset : offset + chunk_size]
+                    chunk_layers = [
+                        list(zip(materials, start)) for start in chunk
+                    ]
+                    train_y.extend(
+                        self._gpu_evaluate_many("cost", chunk_layers)
+                    )
+                    done = len(train_y)
+                    prescreen_progress["done"] = done
+                    crossed_report = (
+                        offset == 0
+                        or done == candidate_n
+                        or done // report_every
+                        != max(0, offset) // report_every
+                    )
+                    if verbose and crossed_report:
+                        print(
+                            f"    surrogate prescreen: {done}/{candidate_n}  "
+                            f"best={min(train_y):.6e}",
+                            flush=True,
+                        )
 
         model = ExtraTreesRegressor(
             n_estimators=self.surrogate_trees,
             random_state=self.multistart_seed,
             n_jobs=-1,
         )
-        model.fit(np.asarray(train_x), np.asarray(train_y))
+        with _progress_heartbeat(
+            f"surrogate training ({self.surrogate_trees} Extra Trees)",
+            interval_s=self.multistart_progress_interval_s,
+            enabled=verbose,
+        ):
+            model.fit(np.asarray(train_x), np.asarray(train_y))
 
         pool_seed = (
             None
             if self.multistart_seed is None
             else int(self.multistart_seed) + 1
         )
-        pool_unit = self._sobol_unit_points(
-            self.surrogate_pool_n,
-            len(free),
-            pool_seed,
-        )
-        pool_starts = [
-            self._unit_to_multistart(unit, materials, x0, free)
-            for unit in pool_unit
-        ]
-        pool_x = np.asarray(
-            [
-                self._normalise_multistart(start, materials, free)
-                for start in pool_starts
+        with _progress_heartbeat(
+            f"surrogate candidate pool (Sobol n={self.surrogate_pool_n})",
+            interval_s=self.multistart_progress_interval_s,
+            enabled=verbose,
+        ):
+            pool_unit = self._sobol_unit_points(
+                self.surrogate_pool_n,
+                len(free),
+                pool_seed,
+            )
+            pool_starts = [
+                self._unit_to_multistart(unit, materials, x0, free)
+                for unit in pool_unit
             ]
-        )
-        tree_predictions = np.asarray(
-            [tree.predict(pool_x) for tree in model.estimators_]
-        )
-        prediction = tree_predictions.mean(axis=0)
-        uncertainty = tree_predictions.std(axis=0)
-        lcb = prediction - self.surrogate_exploration_beta * uncertainty
-        score_span = float(np.ptp(lcb))
-        normalized_score = (
-            (lcb - float(np.min(lcb))) / score_span
-            if score_span > 0.0
-            else np.zeros_like(lcb)
-        )
+            pool_x = np.asarray(
+                [
+                    self._normalise_multistart(start, materials, free)
+                    for start in pool_starts
+                ]
+            )
+        with _progress_heartbeat(
+            f"surrogate inference (pool={len(pool_starts)})",
+            interval_s=self.multistart_progress_interval_s,
+            enabled=verbose,
+        ):
+            tree_predictions = np.asarray(
+                [tree.predict(pool_x) for tree in model.estimators_]
+            )
+            prediction = tree_predictions.mean(axis=0)
+            uncertainty = tree_predictions.std(axis=0)
+            lcb = prediction - self.surrogate_exploration_beta * uncertainty
+            score_span = float(np.ptp(lcb))
+            normalized_score = (
+                (lcb - float(np.min(lcb))) / score_span
+                if score_span > 0.0
+                else np.zeros_like(lcb)
+            )
 
         best_train = min(range(candidate_n), key=lambda i: train_y[i])
         selected_starts = [train_starts[best_train]]
         selected_x = [np.asarray(train_x[best_train])]
         available = set(range(len(pool_starts)))
-        while len(selected_starts) < n_random and available:
-            best_index = min(
-                available,
-                key=lambda i: float(normalized_score[i])
-                - self.surrogate_diversity_weight
-                * min(
-                    float(np.sqrt(np.mean((pool_x[i] - chosen) ** 2)))
-                    for chosen in selected_x
-                ),
-            )
-            available.remove(best_index)
-            selected_starts.append(pool_starts[best_index])
-            selected_x.append(pool_x[best_index])
+        with _progress_heartbeat(
+            f"surrogate batch selection (n={n_random})",
+            interval_s=self.multistart_progress_interval_s,
+            enabled=verbose,
+        ):
+            while len(selected_starts) < n_random and available:
+                best_index = min(
+                    available,
+                    key=lambda i: float(normalized_score[i])
+                    - self.surrogate_diversity_weight
+                    * min(
+                        float(np.sqrt(np.mean((pool_x[i] - chosen) ** 2)))
+                        for chosen in selected_x
+                    ),
+                )
+                available.remove(best_index)
+                selected_starts.append(pool_starts[best_index])
+                selected_x.append(pool_x[best_index])
 
         if verbose:
             print(
@@ -1466,6 +1685,12 @@ class LMThicknessOptimizer:
                 f"starts={len(starts)}",
                 flush=True,
             )
+            if self.multistart_sampler == "extra_trees":
+                print(
+                    f"    surrogate preparation complete; launching "
+                    f"{len(starts)} {local} optimization tasks",
+                    flush=True,
+                )
 
         original_method = self.method
         original_callback = self.on_best
