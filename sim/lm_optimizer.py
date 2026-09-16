@@ -633,9 +633,11 @@ class LMThicknessOptimizer:
             "sobol",
             "extra_trees",
             "optical_qw",
+            "optical_extra_trees",
         ):
             raise ValueError(
-                "multistart_sampler must be lhs|sobol|extra_trees|optical_qw"
+                "multistart_sampler must be "
+                "lhs|sobol|extra_trees|optical_qw|optical_extra_trees"
             )
         self.multistart_candidate_n = max(
             self.multistart_n - 1,
@@ -1662,9 +1664,17 @@ class LMThicknessOptimizer:
         x0: Sequence[float],
         free: Sequence[int],
         n_random: int,
+        *,
+        seed_offset: int = 0,
+        max_rejections: int = 100,
     ) -> list[list[float]]:
         """Physics-informed QW/chirped starts mixed with global Sobol starts."""
-        rng = random.Random(self.multistart_seed)
+        seed = (
+            None
+            if self.multistart_seed is None
+            else int(self.multistart_seed) + int(seed_offset)
+        )
+        rng = random.Random(seed)
         n_optical = min(
             n_random,
             max(0, int(round(n_random * self.optical_sampler_fraction))),
@@ -1673,7 +1683,7 @@ class LMThicknessOptimizer:
         for _ in range(n_optical):
             candidate = None
             # Rejection preserves the optical-thickness prior when feasible.
-            for _attempt in range(100):
+            for _attempt in range(max(1, int(max_rejections))):
                 proposal = self._optical_qw_candidate(
                     materials, x0, free, rng
                 )
@@ -1696,8 +1706,8 @@ class LMThicknessOptimizer:
         if n_sobol > 0:
             sobol_seed = (
                 None
-                if self.multistart_seed is None
-                else int(self.multistart_seed) + 104729
+                if seed is None
+                else seed + 104729
             )
             units = self._sobol_unit_points(
                 n_sobol,
@@ -1813,20 +1823,32 @@ class LMThicknessOptimizer:
             from sklearn.ensemble import ExtraTreesRegressor
         except ImportError as exc:
             raise ImportError(
-                "multistart_sampler=extra_trees requires scikit-learn; "
+                "Extra Trees multistart sampling requires scikit-learn; "
                 "pip install scikit-learn"
             ) from exc
 
+        hybrid = self.multistart_sampler == "optical_extra_trees"
+        source_label = "optical-QW/Sobol" if hybrid else "Sobol"
         candidate_n = max(n_random, self.multistart_candidate_n)
-        train_unit = self._sobol_unit_points(
-            candidate_n,
-            self._multistart_unit_dimensions(len(free)),
-            self.multistart_seed,
-        )
-        train_starts = [
-            self._unit_to_multistart(unit, materials, x0, free)
-            for unit in train_unit
-        ]
+        if hybrid:
+            train_starts = self._optical_qw_multistart_starts(
+                materials,
+                x0,
+                free,
+                candidate_n,
+                seed_offset=0,
+                max_rejections=20,
+            )
+        else:
+            train_unit = self._sobol_unit_points(
+                candidate_n,
+                self._multistart_unit_dimensions(len(free)),
+                self.multistart_seed,
+            )
+            train_starts = [
+                self._unit_to_multistart(unit, materials, x0, free)
+                for unit in train_unit
+            ]
         train_x = [
             self._normalise_multistart(start, materials, free)
             for start in train_starts
@@ -1883,19 +1905,29 @@ class LMThicknessOptimizer:
             else int(self.multistart_seed) + 1
         )
         with _progress_heartbeat(
-            f"surrogate candidate pool (Sobol n={self.surrogate_pool_n})",
+            f"surrogate candidate pool ({source_label} n={self.surrogate_pool_n})",
             interval_s=self.multistart_progress_interval_s,
             enabled=verbose,
         ):
-            pool_unit = self._sobol_unit_points(
-                self.surrogate_pool_n,
-                self._multistart_unit_dimensions(len(free)),
-                pool_seed,
-            )
-            pool_starts = [
-                self._unit_to_multistart(unit, materials, x0, free)
-                for unit in pool_unit
-            ]
+            if hybrid:
+                pool_starts = self._optical_qw_multistart_starts(
+                    materials,
+                    x0,
+                    free,
+                    self.surrogate_pool_n,
+                    seed_offset=1_000_003,
+                    max_rejections=3,
+                )
+            else:
+                pool_unit = self._sobol_unit_points(
+                    self.surrogate_pool_n,
+                    self._multistart_unit_dimensions(len(free)),
+                    pool_seed,
+                )
+                pool_starts = [
+                    self._unit_to_multistart(unit, materials, x0, free)
+                    for unit in pool_unit
+                ]
             pool_x = np.asarray(
                 [
                     self._normalise_multistart(start, materials, free)
@@ -1935,6 +1967,7 @@ class LMThicknessOptimizer:
         if verbose:
             print(
                 f"    surrogate selected: starts={len(selected_starts)}  "
+                f"source={source_label}  "
                 f"candidates={candidate_n}  pool={len(pool_starts)}  "
                 f"trees={self.surrogate_trees}",
                 flush=True,
@@ -2016,7 +2049,10 @@ class LMThicknessOptimizer:
                 f"starts={len(starts)}",
                 flush=True,
             )
-            if self.multistart_sampler == "extra_trees":
+            if self.multistart_sampler in (
+                "extra_trees",
+                "optical_extra_trees",
+            ):
                 print(
                     f"    surrogate preparation complete; launching "
                     f"{len(starts)} {local} optimization tasks",

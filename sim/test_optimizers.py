@@ -351,6 +351,43 @@ class TRFTests(unittest.TestCase):
         self.assertIn("surrogate selection progress: 2/3 selected", log)
         self.assertIn("surrogate batch selection (n=3): completed", log)
 
+    def test_optical_extra_trees_uses_hybrid_training_and_pool(self):
+        optimizer = LMThicknessOptimizer(
+            FixedIndexCalculator(),
+            [BandSpec(500e-9, 1500e-9, R_target=0.9)],
+            method="multistart",
+            multistart_n=4,
+            multistart_seed=13,
+            multistart_sampler="optical_extra_trees",
+            multistart_candidate_n=16,
+            surrogate_trees=10,
+            surrogate_pool_n=32,
+            optical_q_range=(0.7, 1.3),
+            optical_wavelength_range=(800e-9, 1500e-9),
+            optical_sampler_fraction=0.6,
+            thickness_bounds={
+                "h": (10e-9, 500e-9),
+                "l": (10e-9, 500e-9),
+            },
+            max_total_thickness=700e-9,
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            starts = optimizer._generate_multistart_starts(
+                ["h", "l", "h", "l"],
+                [100e-9, 100e-9, 100e-9, 100e-9],
+                [0, 1, 2, 3],
+                verbose=True,
+            )
+        self.assertEqual(len(starts), 4)
+        self.assertTrue(all(sum(start) <= 700e-9 + 1e-15 for start in starts))
+        log = output.getvalue()
+        self.assertIn(
+            "surrogate candidate pool (optical-QW/Sobol n=32): completed",
+            log,
+        )
+        self.assertIn("source=optical-QW/Sobol", log)
+
     def test_incremental_surrogate_selection_matches_brute_force(self):
         import numpy as np
 

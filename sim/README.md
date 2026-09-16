@@ -116,7 +116,7 @@ sim/
 - **`method`**：`auto` / `multistart` / `trf` / `lm` / `adam` / `cg` / `lbfgs` / `de` / `dual_annealing`
 - **`auto`**：先运行多起点局部优化；若指标仍未满足或改善低于阈值，再运行 DE，并用局部方法 polish
 - **`multistart_n`** / **`multistart_method`** / **`multistart_seed`**：多起点数量、局部方法（`trf` / `lbfgs` / `lm` / `cg` / `adam`，默认 TRF）与随机种子
-- **`multistart_sampler`**：`lhs`（默认）/ `sobol` / `extra_trees` / `optical_qw`；`extra_trees` 使用代理模型选点，`optical_qw` 将设计波长和归一化光学厚度映射为物理厚度，并与 Sobol 全局样本混合
+- **`multistart_sampler`**：`lhs`（默认）/ `sobol` / `extra_trees` / `optical_qw` / `optical_extra_trees`；混合采样器使用 optical-QW + Sobol 生成真实训练集和代理候选池，再由 Extra Trees 按 LCB 与多样性选点
 - **`multistart_candidate_n`** / **`surrogate_pool_n`**：Extra Trees 的真实 loss 预筛选数量（默认 256）和代理候选池数量（默认 10000）
 - **`surrogate_trees`** / **`surrogate_exploration_beta`** / **`surrogate_diversity_weight`**：树数量、LCB 探索强度和起点距离多样性权重
 - **`surrogate_selection_gpu_min_work`**：Selection 的 `候选数 × 起点数 × 自由层数` 达到该阈值且 `use_cuda=true` 时使用 CuPy float64；默认 `10000000`
@@ -132,7 +132,7 @@ sim/
 - **`min_thickness_nm`**：单层最小厚度（nm，默认 `8`）；优化时抬高各材料厚度下界
 - **`max_total_thickness_nm`**：所有膜层总厚度的硬上限（nm）；多起点会直接在总厚度可行域内采样，局部优化产生的超限候选则投影回可行域
 - **`thickness_bounds_nm`**：按材料设置优化全过程的硬边界 `[下限, 上限]`（nm）；未列出的材料沿用内置范围
-- **`multistart_sampling_bounds_nm`**：设置 LHS/Sobol/Extra Trees/optical-QW 候选的初值采样范围；必须位于对应的 `thickness_bounds_nm` 之内，未列出的材料沿用厚度硬边界
+- **`multistart_sampling_bounds_nm`**：设置所有多起点候选的初值采样范围；必须位于对应的 `thickness_bounds_nm` 之内，未列出的材料沿用厚度硬边界
 - **`mini_batch`**：`true` 或嵌套对象 `{"batch_size", "n_batches", "n_epochs", "shuffle_seed"}`；在 `method=adam` 或 `multistart_method=adam` 时生效
 - **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.txt`，并追加 `best_updates.csv`
 - **`use_cuda`**：`true` 时走 CuPy 批量 TMM，并在多 GPU 上并行 Surrogate 真实 loss 预筛选和局部优化有限差分；Multistart 起点仍按每卡一个进程并行（仅 NVIDIA CUDA；macOS 不可用）
@@ -178,22 +178,27 @@ Multistart + mini-batch Adam：
 }
 ```
 
-光学厚度采样：
+光学厚度 + Extra Trees 混合采样：
 
-`optical_qw` 使用 `d = q·λ/(4·n(λ)·cosθ)` 映射回物理厚度。
-相邻 H/L 层默认共享设计波长，各周期按波长排序形成 chirp；其余起点
-使用 Sobol，以保留全局探索能力。
+`optical_extra_trees` 使用 `d = q·λ/(4·n(λ)·cosθ)` 生成物理候选，
+并按 `optical_sampler_fraction` 与 Sobol 混合。真实 TMM 预筛选集和
+代理候选池均采用该混合比例，最后由 Extra Trees 选择局部优化起点。
 
 ```json
 {
   "method": "multistart",
-  "multistart_sampler": "optical_qw",
+  "multistart_sampler": "optical_extra_trees",
   "multistart_n": 16,
-  "optical_q_range": [0.6, 1.4],
-  "optical_wavelength_nm": [420, 1800],
+  "optical_q_range": [0.7, 1.3],
+  "optical_wavelength_nm": [800, 1800],
   "optical_pair_shared_wavelength": true,
   "optical_chirp": true,
   "optical_sampler_fraction": 0.7,
+  "multistart_candidate_n": 512,
+  "surrogate_trees": 300,
+  "surrogate_pool_n": 20000,
+  "surrogate_exploration_beta": 1.0,
+  "surrogate_diversity_weight": 0.15,
   "max_total_thickness_nm": 1800,
   "multistart_final_polish_method": "trf"
 }

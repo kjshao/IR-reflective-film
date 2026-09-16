@@ -1069,7 +1069,10 @@ def run(stack_path: str, cfg_path: str) -> int:
             f"  multistart_sampler: {opt.multistart_sampler}  "
             f"n={opt.multistart_n}"
         )
-        if opt.multistart_sampler == "optical_qw":
+        if opt.multistart_sampler in (
+            "optical_qw",
+            "optical_extra_trees",
+        ):
             print(
                 f"  optical_qw: q={opt.optical_q_range}  "
                 f"wavelength_nm="
