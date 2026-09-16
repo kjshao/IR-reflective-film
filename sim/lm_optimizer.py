@@ -118,6 +118,8 @@ def _run_gpu_evaluation_worker(job):
         value = optimizer.cost(layers)
     elif operation == "residuals":
         value = optimizer.residuals(layers)
+    elif operation == "candidate_metrics":
+        value = optimizer.candidate_metrics(layers)
     else:
         raise ValueError(f"unknown GPU evaluation operation {operation!r}")
     return index, value
@@ -417,6 +419,41 @@ def build_residuals(
     return residuals or [0.0]
 
 
+def band_merit_values(
+    bands: Sequence[BandSpec],
+    wavelengths: Sequence[float],
+    R: Sequence[float],
+    T: Sequence[float],
+) -> list[float]:
+    """Unweighted mean-square merit for each band, used to preserve specialists."""
+    merits: list[float] = []
+    for b in bands:
+        sample_errors: list[float] = []
+        for wl, r, t in zip(wavelengths, R, T):
+            if not (b.wl_lo - 1e-15 <= wl <= b.wl_hi + 1e-15):
+                continue
+            error = 0.0
+            if b.R_min is not None:
+                error += max(0.0, b.R_min - r) ** 2
+            if b.R_max is not None:
+                error += max(0.0, r - b.R_max) ** 2
+            if b.T_min is not None:
+                error += max(0.0, b.T_min - t) ** 2
+            if b.T_max is not None:
+                error += max(0.0, t - b.T_max) ** 2
+            if b.R_target is not None:
+                error += (r - b.R_target) ** 2
+            if b.T_target is not None:
+                error += (t - b.T_target) ** 2
+            sample_errors.append(error)
+        merits.append(
+            sum(sample_errors) / len(sample_errors)
+            if sample_errors
+            else math.inf
+        )
+    return merits
+
+
 def specs_satisfied(
     layers: Sequence[tuple[str, float]],
     bands: Sequence[BandSpec],
@@ -547,6 +584,15 @@ class LMThicknessOptimizer:
         surrogate_pool_n: int = 10000,
         surrogate_diversity_weight: float = 0.1,
         surrogate_selection_gpu_min_work: int = 10_000_000,
+        surrogate_rounds: int = 0,
+        surrogate_initial_n: int | None = None,
+        surrogate_batch_n: int = 64,
+        surrogate_wavelength_step: float | None = None,
+        surrogate_validation_factor: float = 2.0,
+        surrogate_elite_fraction: float = 0.2,
+        surrogate_elite_jitter: float = 0.12,
+        surrogate_band_candidates_per_band: int = 1,
+        surrogate_preserve_thinnest: bool = True,
         # Physics-informed quarter-wave optical-thickness start sampling.
         optical_q_range: Sequence[float] = (0.6, 1.4),
         optical_wavelength_range: Sequence[float] | None = None,
@@ -656,6 +702,38 @@ class LMThicknessOptimizer:
         )
         self.surrogate_selection_gpu_min_work = max(
             0, int(surrogate_selection_gpu_min_work)
+        )
+        self.surrogate_rounds = max(0, int(surrogate_rounds))
+        self.surrogate_initial_n = (
+            None
+            if surrogate_initial_n is None
+            else max(1, int(surrogate_initial_n))
+        )
+        self.surrogate_batch_n = max(1, int(surrogate_batch_n))
+        self.surrogate_wavelength_step = (
+            None
+            if surrogate_wavelength_step is None
+            else float(surrogate_wavelength_step)
+        )
+        if (
+            self.surrogate_wavelength_step is not None
+            and self.surrogate_wavelength_step <= 0.0
+        ):
+            raise ValueError("surrogate_wavelength_step must be positive")
+        self.surrogate_validation_factor = max(
+            1.0, float(surrogate_validation_factor)
+        )
+        self.surrogate_elite_fraction = min(
+            1.0, max(0.0, float(surrogate_elite_fraction))
+        )
+        self.surrogate_elite_jitter = max(
+            0.0, float(surrogate_elite_jitter)
+        )
+        self.surrogate_band_candidates_per_band = max(
+            0, int(surrogate_band_candidates_per_band)
+        )
+        self.surrogate_preserve_thinnest = bool(
+            surrogate_preserve_thinnest
         )
         if len(optical_q_range) != 2:
             raise ValueError("optical_q_range must contain [lower, upper]")
@@ -946,7 +1024,13 @@ class LMThicknessOptimizer:
         if executor is None or len(layers_batch) < 2:
             if operation == "cost":
                 return [self.cost(layers) for layers in layers_batch]
-            return [self.residuals(layers) for layers in layers_batch]
+            if operation == "residuals":
+                return [self.residuals(layers) for layers in layers_batch]
+            if operation == "candidate_metrics":
+                return [
+                    self.candidate_metrics(layers) for layers in layers_batch
+                ]
+            raise ValueError(f"unknown GPU evaluation operation {operation!r}")
         jobs = [
             (i, operation, list(layers), list(self.wavelengths))
             for i, layers in enumerate(layers_batch)
@@ -982,6 +1066,27 @@ class LMThicknessOptimizer:
     def cost(self, layers: Sequence[tuple[str, float]]) -> float:
         r = self.residuals(layers)
         return 0.5 * sum(x * x for x in r)
+
+    def candidate_metrics(
+        self,
+        layers: Sequence[tuple[str, float]],
+    ) -> tuple[float, list[float], float]:
+        """Scalar loss, per-band merits, and total thickness from one spectrum."""
+        R, T = self._rt(layers)
+        residuals = build_residuals(
+            layers,
+            self.bands,
+            self.wavelengths,
+            R,
+            T,
+            thickness_weight=self.thickness_weight,
+        )
+        cost = 0.5 * sum(value * value for value in residuals)
+        return (
+            cost,
+            band_merit_values(self.bands, self.wavelengths, R, T),
+            sum(thickness for _, thickness in layers),
+        )
 
     def bounds_for(self, material: str) -> tuple[float, float]:
         return _bounds_for(
@@ -1749,8 +1854,20 @@ class LMThicknessOptimizer:
         pool_backend = xp.asarray(pool_x, dtype=xp.float64)
         score_backend = xp.asarray(normalized_score, dtype=xp.float64)
         initial_backend = xp.asarray(initial_x, dtype=xp.float64)
-        min_distance = xp.sqrt(
-            xp.mean((pool_backend - initial_backend) ** 2, axis=1)
+        if initial_backend.ndim == 1:
+            initial_backend = initial_backend[None, :]
+        min_distance = xp.min(
+            xp.sqrt(
+                xp.mean(
+                    (
+                        pool_backend[:, None, :]
+                        - initial_backend[None, :, :]
+                    )
+                    ** 2,
+                    axis=2,
+                )
+            ),
+            axis=1,
         )
         selected_mask = xp.zeros(n_pool, dtype=xp.bool_)
         selected_indices: list[int] = []
@@ -1809,6 +1926,133 @@ class LMThicknessOptimizer:
                     )
         return selected_indices
 
+    def _surrogate_source_starts(
+        self,
+        materials: Sequence[str],
+        x0: Sequence[float],
+        free: Sequence[int],
+        count: int,
+        *,
+        hybrid: bool,
+        seed_offset: int,
+        max_rejections: int = 3,
+    ) -> list[list[float]]:
+        """Generate one reproducible Sobol or optical-QW/Sobol candidate set."""
+        if count <= 0:
+            return []
+        if hybrid:
+            return self._optical_qw_multistart_starts(
+                materials,
+                x0,
+                free,
+                count,
+                seed_offset=seed_offset,
+                max_rejections=max_rejections,
+            )
+        seed = (
+            None
+            if self.multistart_seed is None
+            else int(self.multistart_seed) + int(seed_offset)
+        )
+        unit = self._sobol_unit_points(
+            count,
+            self._multistart_unit_dimensions(len(free)),
+            seed,
+        )
+        return [
+            self._unit_to_multistart(point, materials, x0, free)
+            for point in unit
+        ]
+
+    def _elite_perturbation_starts(
+        self,
+        train_starts: Sequence[Sequence[float]],
+        train_y: Sequence[float],
+        materials: Sequence[str],
+        free: Sequence[int],
+        count: int,
+        *,
+        seed_offset: int,
+    ) -> list[list[float]]:
+        """Sample near several current elites while retaining feasibility."""
+        if count <= 0 or not train_starts:
+            return []
+        seed = (
+            None
+            if self.multistart_seed is None
+            else int(self.multistart_seed) + int(seed_offset)
+        )
+        rng = random.Random(seed)
+        elite_count = max(1, min(len(train_starts), int(math.sqrt(len(train_starts)))))
+        elite_indices = sorted(
+            range(len(train_starts)), key=lambda i: train_y[i]
+        )[:elite_count]
+        starts: list[list[float]] = []
+        for i in range(count):
+            elite = train_starts[elite_indices[i % elite_count]]
+            candidate = list(elite)
+            for j in free:
+                lo, hi = self.multistart_bounds_for(materials[j])
+                span = hi - lo
+                normalized = (candidate[j] - lo) / span
+                normalized += rng.gauss(0.0, self.surrogate_elite_jitter)
+                candidate[j] = lo + min(1.0, max(0.0, normalized)) * span
+            starts.append(self._project(materials, candidate, free))
+        return starts
+
+    def _preserved_specialist_indices(
+        self,
+        costs: Sequence[float],
+        band_merits: Sequence[Sequence[float]],
+        total_thicknesses: Sequence[float],
+        limit: int,
+    ) -> list[int]:
+        """Prioritise overall, per-band, and thin candidates without duplicates."""
+        if limit <= 0 or not costs:
+            return []
+        selected: list[int] = []
+
+        def add(index: int) -> None:
+            if index not in selected and len(selected) < limit:
+                selected.append(index)
+
+        add(min(range(len(costs)), key=lambda i: costs[i]))
+        n_bands = max((len(values) for values in band_merits), default=0)
+        for band_index in range(n_bands):
+            if self.surrogate_band_candidates_per_band <= 0:
+                break
+            ranked = sorted(
+                range(len(costs)),
+                key=lambda i: (
+                    band_merits[i][band_index]
+                    if band_index < len(band_merits[i])
+                    else math.inf
+                ),
+            )
+            kept = 0
+            for index in ranked:
+                merit = (
+                    band_merits[index][band_index]
+                    if band_index < len(band_merits[index])
+                    else math.inf
+                )
+                if not math.isfinite(merit):
+                    break
+                before = len(selected)
+                add(index)
+                if len(selected) > before:
+                    kept += 1
+                if kept >= self.surrogate_band_candidates_per_band:
+                    break
+        if self.surrogate_preserve_thinnest and total_thicknesses:
+            add(
+                min(
+                    range(len(total_thicknesses)),
+                    key=lambda i: total_thicknesses[i],
+                )
+            )
+        return selected
+
     def _extra_trees_multistart_starts(
         self,
         materials: Sequence[str],
@@ -1829,147 +2073,303 @@ class LMThicknessOptimizer:
 
         hybrid = self.multistart_sampler == "optical_extra_trees"
         source_label = "optical-QW/Sobol" if hybrid else "Sobol"
-        candidate_n = max(n_random, self.multistart_candidate_n)
-        if hybrid:
-            train_starts = self._optical_qw_multistart_starts(
-                materials,
-                x0,
-                free,
-                candidate_n,
-                seed_offset=0,
-                max_rejections=20,
+        candidate_budget = max(n_random, self.multistart_candidate_n)
+        if self.surrogate_rounds > 0:
+            default_initial = max(n_random, candidate_budget // 2)
+            initial_n = min(
+                candidate_budget,
+                self.surrogate_initial_n or default_initial,
             )
         else:
-            train_unit = self._sobol_unit_points(
-                candidate_n,
-                self._multistart_unit_dimensions(len(free)),
-                self.multistart_seed,
-            )
-            train_starts = [
-                self._unit_to_multistart(unit, materials, x0, free)
-                for unit in train_unit
-            ]
-        train_x = [
-            self._normalise_multistart(start, materials, free)
-            for start in train_starts
-        ]
-        train_y = []
-        report_every = max(1, candidate_n // 10)
-        prescreen_progress = {"done": 0, "total": candidate_n}
+            initial_n = candidate_budget
+
+        train_starts = self._surrogate_source_starts(
+            materials,
+            x0,
+            free,
+            initial_n,
+            hybrid=hybrid,
+            seed_offset=0,
+            max_rejections=20,
+        )
+        train_y: list[float] = []
+        train_band_merits: list[list[float]] = []
+        train_total_thicknesses: list[float] = []
         chunk_size = max(1, 2 * len(self.multistart_gpu_ids))
-        with self._gpu_evaluation_pool(free, verbose=verbose):
+        saved_wavelengths = list(self.wavelengths)
+        prescreen_wavelengths = (
+            wavelength_grid(self.bands, self.surrogate_wavelength_step)
+            if self.surrogate_wavelength_step is not None
+            else saved_wavelengths
+        )
+
+        def evaluate_metrics(
+            starts: Sequence[Sequence[float]],
+            *,
+            label: str,
+        ) -> list[tuple[float, list[float], float]]:
+            values: list[tuple[float, list[float], float]] = []
+            progress = {"done": 0, "total": len(starts)}
+            report_every = max(1, len(starts) // 10)
             with _progress_heartbeat(
-                "surrogate prescreen (real TMM loss)",
+                label,
                 interval_s=self.multistart_progress_interval_s,
                 enabled=verbose,
-                progress=prescreen_progress,
+                progress=progress,
             ):
-                for offset in range(0, candidate_n, chunk_size):
-                    chunk = train_starts[offset : offset + chunk_size]
-                    chunk_layers = [
+                for offset in range(0, len(starts), chunk_size):
+                    chunk = starts[offset : offset + chunk_size]
+                    layers_batch = [
                         list(zip(materials, start)) for start in chunk
                     ]
-                    train_y.extend(
-                        self._gpu_evaluate_many("cost", chunk_layers)
+                    values.extend(
+                        self._gpu_evaluate_many(
+                            "candidate_metrics", layers_batch
+                        )
                     )
-                    done = len(train_y)
-                    prescreen_progress["done"] = done
-                    crossed_report = (
+                    done = len(values)
+                    progress["done"] = done
+                    if verbose and (
                         offset == 0
-                        or done == candidate_n
+                        or done == len(starts)
                         or done // report_every
                         != max(0, offset) // report_every
-                    )
-                    if verbose and crossed_report:
+                    ):
                         print(
-                            f"    surrogate prescreen: {done}/{candidate_n}  "
-                            f"best={min(train_y):.6e}",
+                            f"    {label}: {done}/{len(starts)}  "
+                            f"best={min(value[0] for value in values):.6e}",
                             flush=True,
                         )
+            return values
 
-        model = ExtraTreesRegressor(
-            n_estimators=self.surrogate_trees,
-            random_state=self.multistart_seed,
-            n_jobs=-1,
-        )
-        with _progress_heartbeat(
-            f"surrogate training ({self.surrogate_trees} Extra Trees)",
-            interval_s=self.multistart_progress_interval_s,
-            enabled=verbose,
-        ):
-            model.fit(np.asarray(train_x), np.asarray(train_y))
+        def fit_model(round_label: str):
+            model = ExtraTreesRegressor(
+                n_estimators=self.surrogate_trees,
+                random_state=self.multistart_seed,
+                n_jobs=-1,
+            )
+            train_x = [
+                self._normalise_multistart(start, materials, free)
+                for start in train_starts
+            ]
+            with _progress_heartbeat(
+                f"surrogate training {round_label} "
+                f"({self.surrogate_trees} Extra Trees, n={len(train_x)})",
+                interval_s=self.multistart_progress_interval_s,
+                enabled=verbose,
+            ):
+                model.fit(np.asarray(train_x), np.asarray(train_y))
+            return model, train_x
 
-        pool_seed = (
-            None
-            if self.multistart_seed is None
-            else int(self.multistart_seed) + 1
-        )
-        with _progress_heartbeat(
-            f"surrogate candidate pool ({source_label} n={self.surrogate_pool_n})",
-            interval_s=self.multistart_progress_interval_s,
-            enabled=verbose,
-        ):
-            if hybrid:
-                pool_starts = self._optical_qw_multistart_starts(
-                    materials,
-                    x0,
-                    free,
-                    self.surrogate_pool_n,
-                    seed_offset=1_000_003,
-                    max_rejections=3,
-                )
-            else:
-                pool_unit = self._sobol_unit_points(
-                    self.surrogate_pool_n,
-                    self._multistart_unit_dimensions(len(free)),
-                    pool_seed,
-                )
-                pool_starts = [
-                    self._unit_to_multistart(unit, materials, x0, free)
-                    for unit in pool_unit
-                ]
+        def infer(model, pool_starts, round_label: str):
             pool_x = np.asarray(
                 [
                     self._normalise_multistart(start, materials, free)
                     for start in pool_starts
                 ]
             )
-        with _progress_heartbeat(
-            f"surrogate inference (pool={len(pool_starts)})",
-            interval_s=self.multistart_progress_interval_s,
-            enabled=verbose,
-        ):
-            tree_predictions = np.asarray(
-                [tree.predict(pool_x) for tree in model.estimators_]
-            )
-            prediction = tree_predictions.mean(axis=0)
-            uncertainty = tree_predictions.std(axis=0)
-            lcb = prediction - self.surrogate_exploration_beta * uncertainty
+            with _progress_heartbeat(
+                f"surrogate inference {round_label} "
+                f"(pool={len(pool_starts)})",
+                interval_s=self.multistart_progress_interval_s,
+                enabled=verbose,
+            ):
+                tree_predictions = np.asarray(
+                    [tree.predict(pool_x) for tree in model.estimators_]
+                )
+                prediction = tree_predictions.mean(axis=0)
+                uncertainty = tree_predictions.std(axis=0)
+                lcb = (
+                    prediction
+                    - self.surrogate_exploration_beta * uncertainty
+                )
             score_span = float(np.ptp(lcb))
             normalized_score = (
                 (lcb - float(np.min(lcb))) / score_span
                 if score_span > 0.0
                 else np.zeros_like(lcb)
             )
+            return pool_x, lcb, normalized_score
 
-        best_train = min(range(candidate_n), key=lambda i: train_y[i])
-        selected_starts = [train_starts[best_train]]
-        selected_indices = self._select_surrogate_pool_indices(
-            pool_x,
-            normalized_score,
-            np.asarray(train_x[best_train]),
-            n_random,
-            lcb,
-            verbose=verbose,
+        self._set_wavelengths(prescreen_wavelengths)
+        try:
+            with self._gpu_evaluation_pool(free, verbose=verbose):
+                initial_metrics = evaluate_metrics(
+                    train_starts,
+                    label="surrogate initial prescreen (real TMM loss)",
+                )
+                train_y.extend(value[0] for value in initial_metrics)
+                train_band_merits.extend(value[1] for value in initial_metrics)
+                train_total_thicknesses.extend(
+                    value[2] for value in initial_metrics
+                )
+                for round_index in range(1, self.surrogate_rounds + 1):
+                    remaining = candidate_budget - len(train_starts)
+                    if remaining <= 0:
+                        break
+                    batch_n = min(self.surrogate_batch_n, remaining)
+                    model, train_x = fit_model(
+                        f"round {round_index}/{self.surrogate_rounds}"
+                    )
+                    pool_starts = self._surrogate_source_starts(
+                        materials,
+                        x0,
+                        free,
+                        self.surrogate_pool_n,
+                        hybrid=hybrid,
+                        seed_offset=round_index * 1_000_003,
+                    )
+                    pool_x, lcb, normalized_score = infer(
+                        model, pool_starts, f"round {round_index}"
+                    )
+
+                    elite_n = min(
+                        batch_n,
+                        int(round(batch_n * self.surrogate_elite_fraction)),
+                    )
+                    acquisition_n = batch_n - elite_n
+                    new_starts = self._elite_perturbation_starts(
+                        train_starts,
+                        train_y,
+                        materials,
+                        free,
+                        elite_n,
+                        seed_offset=round_index * 2_000_033,
+                    )
+                    if acquisition_n > 0:
+                        best_train = min(
+                            range(len(train_y)), key=lambda i: train_y[i]
+                        )
+                        selected = self._select_surrogate_pool_indices(
+                            pool_x,
+                            normalized_score,
+                            np.asarray(train_x[best_train]),
+                            acquisition_n + 1,
+                            lcb,
+                            verbose=verbose,
+                        )
+                        new_starts.extend(pool_starts[i] for i in selected)
+
+                    new_metrics = evaluate_metrics(
+                        new_starts,
+                        label=(
+                            f"surrogate active round "
+                            f"{round_index}/{self.surrogate_rounds}"
+                        ),
+                    )
+                    train_starts.extend(new_starts)
+                    train_y.extend(value[0] for value in new_metrics)
+                    train_band_merits.extend(
+                        value[1] for value in new_metrics
+                    )
+                    train_total_thicknesses.extend(
+                        value[2] for value in new_metrics
+                    )
+                    if verbose:
+                        print(
+                            f"    surrogate active summary: "
+                            f"round={round_index}  "
+                            f"training={len(train_starts)}/{candidate_budget}  "
+                            f"elite={elite_n}  acquisition={acquisition_n}  "
+                            f"best={min(train_y):.6e}",
+                            flush=True,
+                        )
+        finally:
+            self._set_wavelengths(saved_wavelengths)
+
+        model, train_x = fit_model("final")
+        with _progress_heartbeat(
+            f"surrogate candidate pool "
+            f"({source_label} n={self.surrogate_pool_n})",
+            interval_s=self.multistart_progress_interval_s,
+            enabled=verbose,
+        ):
+            pool_starts = self._surrogate_source_starts(
+                materials,
+                x0,
+                free,
+                self.surrogate_pool_n,
+                hybrid=hybrid,
+                seed_offset=9_000_091,
+            )
+        pool_x, lcb, normalized_score = infer(model, pool_starts, "final")
+
+        validation_n = min(
+            len(pool_starts) + 1,
+            max(
+                n_random,
+                int(math.ceil(n_random * self.surrogate_validation_factor)),
+            ),
         )
-        selected_starts.extend(pool_starts[i] for i in selected_indices)
+        preserved_train = self._preserved_specialist_indices(
+            train_y,
+            train_band_merits,
+            train_total_thicknesses,
+            min(validation_n, n_random),
+        )
+        provisional = [train_starts[i] for i in preserved_train]
+        pool_needed = validation_n - len(provisional)
+        if pool_needed > 0:
+            selected_indices = self._select_surrogate_pool_indices(
+                pool_x,
+                normalized_score,
+                np.asarray([train_x[i] for i in preserved_train]),
+                pool_needed + 1,
+                lcb,
+                verbose=verbose,
+            )
+            provisional.extend(pool_starts[i] for i in selected_indices)
+
+        self._set_wavelengths(saved_wavelengths)
+        with self._gpu_evaluation_pool(free, verbose=verbose):
+            exact_metrics = evaluate_metrics(
+                provisional,
+                label="surrogate full-grid validation",
+            )
+        exact_y = [value[0] for value in exact_metrics]
+        exact_band_merits = [value[1] for value in exact_metrics]
+        exact_total_thicknesses = [value[2] for value in exact_metrics]
+        exact_x = np.asarray(
+            [
+                self._normalise_multistart(start, materials, free)
+                for start in provisional
+            ]
+        )
+        exact_span = float(np.ptp(exact_y))
+        exact_score = (
+            (np.asarray(exact_y) - min(exact_y)) / exact_span
+            if exact_span > 0.0
+            else np.zeros(len(exact_y))
+        )
+        preserved_exact = self._preserved_specialist_indices(
+            exact_y,
+            exact_band_merits,
+            exact_total_thicknesses,
+            n_random,
+        )
+        selected_starts = [provisional[i] for i in preserved_exact]
+        for index in preserved_exact:
+            exact_score[index] = np.inf
+        remaining_final = n_random - len(selected_starts)
+        if remaining_final > 0:
+            final_indices = self._select_surrogate_pool_indices(
+                exact_x,
+                exact_score,
+                exact_x[preserved_exact],
+                remaining_final + 1,
+                np.asarray(exact_y),
+                verbose=verbose,
+            )
+            selected_starts.extend(provisional[i] for i in final_indices)
 
         if verbose:
             print(
                 f"    surrogate selected: starts={len(selected_starts)}  "
-                f"source={source_label}  "
-                f"candidates={candidate_n}  pool={len(pool_starts)}  "
-                f"trees={self.surrogate_trees}",
+                f"source={source_label}  training={len(train_starts)}  "
+                f"rounds={self.surrogate_rounds}  "
+                f"validation={len(provisional)}  "
+                f"preserved={len(preserved_exact)}  "
+                f"pool={len(pool_starts)}  trees={self.surrogate_trees}",
                 flush=True,
             )
         return selected_starts

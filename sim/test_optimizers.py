@@ -344,12 +344,36 @@ class TRFTests(unittest.TestCase):
         self.assertEqual(starts[0], [120e-9, 120e-9])
         self.assertTrue(all(sum(start) <= 350e-9 + 1e-15 for start in starts))
         log = output.getvalue()
-        self.assertIn("surrogate prescreen (real TMM loss): started", log)
-        self.assertIn("surrogate training (10 Extra Trees): completed", log)
-        self.assertIn("surrogate inference (pool=32): completed", log)
-        self.assertIn("surrogate selection setup: target=3", log)
-        self.assertIn("surrogate selection progress: 2/3 selected", log)
-        self.assertIn("surrogate batch selection (n=3): completed", log)
+        self.assertIn(
+            "surrogate initial prescreen (real TMM loss): started", log
+        )
+        self.assertIn("surrogate training final (10 Extra Trees, n=16)", log)
+        self.assertIn("surrogate inference final (pool=32): completed", log)
+        self.assertIn("surrogate full-grid validation: completed", log)
+        self.assertIn("preserved=", log)
+
+    def test_surrogate_preserves_overall_band_and_thin_specialists(self):
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [
+                BandSpec(500e-9, 600e-9, R_target=0.2),
+                BandSpec(700e-9, 800e-9, R_target=0.8),
+            ],
+            surrogate_band_candidates_per_band=1,
+            surrogate_preserve_thinnest=True,
+        )
+        selected = optimizer._preserved_specialist_indices(
+            costs=[0.4, 0.3, 0.2, 0.1],
+            band_merits=[
+                [0.5, 0.1],
+                [0.1, 0.4],
+                [0.3, 0.05],
+                [0.2, 0.2],
+            ],
+            total_thicknesses=[400e-9, 300e-9, 200e-9, 100e-9],
+            limit=4,
+        )
+        self.assertEqual(selected, [3, 1, 2])
 
     def test_optical_extra_trees_uses_hybrid_training_and_pool(self):
         optimizer = LMThicknessOptimizer(
@@ -362,6 +386,13 @@ class TRFTests(unittest.TestCase):
             multistart_candidate_n=16,
             surrogate_trees=10,
             surrogate_pool_n=32,
+            surrogate_rounds=2,
+            surrogate_initial_n=8,
+            surrogate_batch_n=4,
+            surrogate_wavelength_step=50e-9,
+            surrogate_validation_factor=2.0,
+            surrogate_elite_fraction=0.25,
+            surrogate_elite_jitter=0.1,
             optical_q_range=(0.7, 1.3),
             optical_wavelength_range=(800e-9, 1500e-9),
             optical_sampler_fraction=0.6,
@@ -386,6 +417,10 @@ class TRFTests(unittest.TestCase):
             "surrogate candidate pool (optical-QW/Sobol n=32): completed",
             log,
         )
+        self.assertIn("surrogate active round 1/2: completed", log)
+        self.assertIn("surrogate active round 2/2: completed", log)
+        self.assertIn("training=16  rounds=2", log)
+        self.assertIn("surrogate full-grid validation: completed", log)
         self.assertIn("source=optical-QW/Sobol", log)
 
     def test_incremental_surrogate_selection_matches_brute_force(self):

@@ -119,6 +119,12 @@ sim/
 - **`multistart_sampler`**：`lhs`（默认）/ `sobol` / `extra_trees` / `optical_qw` / `optical_extra_trees`；混合采样器使用 optical-QW + Sobol 生成真实训练集和代理候选池，再由 Extra Trees 按 LCB 与多样性选点
 - **`multistart_candidate_n`** / **`surrogate_pool_n`**：Extra Trees 的真实 loss 预筛选数量（默认 256）和代理候选池数量（默认 10000）
 - **`surrogate_trees`** / **`surrogate_exploration_beta`** / **`surrogate_diversity_weight`**：树数量、LCB 探索强度和起点距离多样性权重
+- **`surrogate_rounds`** / **`surrogate_initial_n`** / **`surrogate_batch_n`**：主动采样轮数、初始真实样本数和每轮新增真实样本数；总真实评估不超过 `multistart_candidate_n`
+- **`surrogate_wavelength_step_nm`**：代理预筛选使用的粗波长步长；最终候选仍用完整优化网格复核
+- **`surrogate_validation_factor`**：完整网格复核候选数相对最终随机起点数的倍率，默认 `2`
+- **`surrogate_elite_fraction`** / **`surrogate_elite_jitter`**：每轮在当前优质候选附近重采样的比例和归一化厚度扰动标准差
+- **`surrogate_band_candidates_per_band`**：每个波段优先保留的专长候选数，默认 `1`；按该波段自身的均方目标/约束误差排名，不受其他波段权重影响；若要保证所有名额，需使 `multistart_n - 1` 足以容纳综合最优、各波段候选和最薄候选
+- **`surrogate_preserve_thinnest`**：是否额外保留总厚度最低的候选，默认 `true`；候选名额不足时，综合 loss 和分波段候选优先
 - **`surrogate_selection_gpu_min_work`**：Selection 的 `候选数 × 起点数 × 自由层数` 达到该阈值且 `use_cuda=true` 时使用 CuPy float64；默认 `10000000`
 - **`multistart_final_polish_method`**：对多起点最优结果进行最终精修；推荐 `trf`
 - **`gpu_ids`**：例如 `[0, 1, 2, 3]`；指定 CUDA 设备，要求 `use_cuda: true`；省略时自动使用所有可见 GPU（旧键 `multistart_gpu_ids` 仍兼容）
@@ -199,6 +205,15 @@ Multistart + mini-batch Adam：
   "surrogate_pool_n": 20000,
   "surrogate_exploration_beta": 1.0,
   "surrogate_diversity_weight": 0.15,
+  "surrogate_rounds": 4,
+  "surrogate_initial_n": 256,
+  "surrogate_batch_n": 64,
+  "surrogate_wavelength_step_nm": 30,
+  "surrogate_validation_factor": 2.0,
+  "surrogate_elite_fraction": 0.2,
+  "surrogate_elite_jitter": 0.12,
+  "surrogate_band_candidates_per_band": 1,
+  "surrogate_preserve_thinnest": true,
   "max_total_thickness_nm": 1800,
   "multistart_final_polish_method": "trf"
 }

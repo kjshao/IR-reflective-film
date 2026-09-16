@@ -648,6 +648,33 @@ def make_optimizer_from_config(
         surrogate_selection_gpu_min_work=int(
             cfg.get("surrogate_selection_gpu_min_work", 10_000_000)
         ),
+        surrogate_rounds=int(cfg.get("surrogate_rounds", 0)),
+        surrogate_initial_n=cfg.get("surrogate_initial_n"),
+        surrogate_batch_n=int(cfg.get("surrogate_batch_n", 64)),
+        surrogate_wavelength_step=(
+            float(cfg["surrogate_wavelength_step"])
+            if cfg.get("surrogate_wavelength_step") is not None
+            else (
+                float(cfg["surrogate_wavelength_step_nm"]) * 1e-9
+                if cfg.get("surrogate_wavelength_step_nm") is not None
+                else None
+            )
+        ),
+        surrogate_validation_factor=float(
+            cfg.get("surrogate_validation_factor", 2.0)
+        ),
+        surrogate_elite_fraction=float(
+            cfg.get("surrogate_elite_fraction", 0.2)
+        ),
+        surrogate_elite_jitter=float(
+            cfg.get("surrogate_elite_jitter", 0.12)
+        ),
+        surrogate_band_candidates_per_band=int(
+            cfg.get("surrogate_band_candidates_per_band", 1)
+        ),
+        surrogate_preserve_thinnest=bool(
+            cfg.get("surrogate_preserve_thinnest", True)
+        ),
         optical_q_range=cfg.get("optical_q_range", (0.6, 1.4)),
         optical_wavelength_range=(
             cfg.get("optical_wavelength_range")
