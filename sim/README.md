@@ -32,7 +32,7 @@ sim/.venv/bin/python sim/optimize_film.py \
 2. **多波段 R 目标**：每段设 `R_target`（0–1），或 `objective: maximize|minimize`（默认 1 / 0）
 3. **统一损失**：波段归一化 MSE（相对各段 `R_target`）+ 可选 `thickness_weight`；所有算法优化并报告同一数值
 4. **优化方法**：`auto`（默认）、`multistart`、`trf`、`lm`、`adam`、`cg`、`lbfgs`、`de`、`dual_annealing`
-5. **层数合成**：`use_needle: true` 时在各界面探测插层灵敏度，对 top-k 候选局部精修，最后尝试剪除薄层
+5. **自动增减层**：`layer_search.enabled: true` 使用 Pareto Beam 同时搜索多个层数和材料拓扑；`use_needle: true` 仍提供较轻量的单路径灵敏度合成
 6. **绘图**：matplotlib 输出优化前后 R/T、波段着色，以及实际使用的 n,k
 
 ## 目录结构
@@ -41,10 +41,12 @@ sim/.venv/bin/python sim/optimize_film.py \
 sim/
   optimize_film.py      # 入口：文本膜系 + JSON 配置、优化、出图
   multistart_optimize.py # 按参数生成指定层数 H/L 膜系并执行多起点优化
+  variable_layer_optimize.py # 自动生成 H/L 初始构型并执行可变层数优化
   plot_rt_txt.py        # 文本膜系 R/T 计算与绘图
   plot_rt.py            # JSON 膜系 R/T 计算与绘图（含共享绘图工具）
   rt_calculator.py      # TMM / 外部 R/T 接口
   lm_optimizer.py       # TRF / LM / Adam / DE 等厚度优化核心
+  layer_search.py       # Pareto Beam 自动增删层、粗筛与 Top-K 精修
   needle.py             # 灵敏度插层、Deep Search 候选与剪枝
   tmm.py                # 传输矩阵核心
   dispersion.py         # 材料色散库（n+ik；见 materials/SOURCES.md）
@@ -55,6 +57,7 @@ sim/
     example_stack.txt              # 文本膜系示例
     example_optimize_film.json     # 优化配置示例
     example_multistart_optimize.json # 自动生成膜系的多起点配置
+    example_variable_layer_optimize.json # 自动增减层 Pareto Beam 配置
     example_plot_rt.json           # JSON 膜系绘图示例
     external_rt_stub.py            # 外部引擎桩
 ```
@@ -131,6 +134,7 @@ sim/
 - **`multistart_progress_interval_s`**：Surrogate 各阶段及多 GPU 任务的进度心跳间隔，默认 `10` 秒
 - **`auto_de_fallback`** / **`auto_min_relative_improvement`**：控制自动全局回退
 - **`use_needle`**：允许改变层数；相关参数为 `max_layers`、`needle_candidate_mode`、`deep_search_candidates`、`needle_probe_nm`、`prune_threshold_nm`
+- **`layer_search`**：启用 Pareto Beam 自动增减层；与 `use_needle` 互斥。粗筛阶段使用低预算 optical-QW/Sobol + 局部优化，最终 Top-K 恢复顶层 `method` 和完整波长网格精修
 - **`cg_initial_step_nm`** / **`cg_max_step_nm`** / **`cg_restart`**：CG 专用（默认分别跟 `adam_lr_nm`、`adam_max_step_nm`、自由层数）
 - **`lbfgs_m`** / **`lbfgs_maxls`**：L-BFGS-B 历史向量数（默认 10）与线搜索最大步数（默认 20）
 - **`R_target`**：写在每个 `bands[]` 上，反射率目标 ∈ [0, 1]；省略时由 `objective` 得到 1（maximize）或 0（minimize）
@@ -218,6 +222,74 @@ Multistart + mini-batch Adam：
   "multistart_final_polish_method": "trf"
 }
 ```
+
+## Pareto Beam 自动增减层
+
+推荐使用专用脚本自动生成四分之一波长初始构型并立即开始搜索：
+
+```bash
+sim/.venv/bin/python sim/variable_layer_optimize.py \
+  --config sim/examples/example_variable_layer_optimize.json
+```
+
+初始层数依次取 `--initial-layers`、`stack_init.initial_layers`、
+`layer_search.initial_layers`，均未设置时取 `min_layers` 与 `max_layers`
+的中点。可用 `--mode hlh|lhl`、`--output-dir` 和
+`--method multistart|auto` 覆盖配置。自动生成的膜系与最终生效配置保存在
+输出目录的 `_inputs/` 中。
+
+也可以自行提供已有膜系，在普通 `optimize_film.py` 配置中加入
+`layer_search`：
+
+```bash
+sim/.venv/bin/python sim/optimize_film.py \
+  sim/examples/example_stack.txt \
+  sim/examples/example_variable_layer_optimize.json
+```
+
+搜索器首先生成输入栈、HLH/LHL 多层数栈和随机拓扑；每代通过单层/层对
+插入、删除、材料替换与拆层产生候选。候选先在粗波长网格上低成本优化，
+再按分波段误差、规格违反量、总厚度和层数做 Pareto 排序。Beam 会按波段
+和层数保留专长候选，最终只对 `final_top_k` 个拓扑运行配置中的完整
+`optical_extra_trees` 或其他优化流程。
+
+```json
+{
+  "method": "multistart",
+  "multistart_sampler": "optical_extra_trees",
+  "layer_search": {
+    "enabled": true,
+    "materials": ["tio2", "sio2"],
+    "min_layers": 4,
+    "max_layers": 18,
+    "beam_width": 12,
+    "offspring_per_parent": 10,
+    "max_generations": 8,
+    "stagnation_generations": 3,
+    "coarse_wavelength_step_nm": 40,
+    "coarse_optical_starts": 8,
+    "coarse_sobol_starts": 8,
+    "coarse_local_method": "trf",
+    "coarse_local_max_iter": 20,
+    "pareto_archive_size": 64,
+    "preserve_per_band": 2,
+    "preserve_per_layer_count": 1,
+    "final_top_k": 4,
+    "seed": 7
+  }
+}
+```
+
+完整示例见 `examples/example_variable_layer_optimize.json`。输出目录额外生成：
+
+- `layer_search_ranking.csv`：最终完整网格候选排名
+- `layer_search_ranking.json`：拓扑、各层厚度、各波段误差和来源操作
+- `stack_best.txt`：排名第一的可变层数膜系
+
+`beam_width` 和 `offspring_per_parent` 控制拓扑覆盖范围；
+`coarse_optical_starts + coarse_sobol_starts` 控制每个拓扑的粗筛成本；
+`final_top_k` 控制运行完整高成本优化的拓扑数量。若 `nk_source=fixed`，
+`layer_search.materials` 必须已出现在输入膜系中。
 
 ## 指定层数并自动生成膜系
 

@@ -68,8 +68,14 @@ from lm_optimizer import (
     BandSpec,
     LMThicknessOptimizer,
     _bounds_for,
+    band_merit_values,
     parse_multistart_sampling_bounds_nm,
     parse_thickness_bounds_nm,
+)
+from layer_search import (
+    LayerSearchConfig,
+    ParetoBeamLayerSearch,
+    write_layer_search_results,
 )
 from needle import NeedleSynthesizer
 from plot_rt import (
@@ -602,6 +608,25 @@ class MaxMinROptimizer(LMThicknessOptimizer):
         r = self.residuals(layers)
         return 0.5 * sum(v * v for v in r)
 
+    def candidate_metrics(
+        self,
+        layers: Sequence[tuple[str, float]],
+    ) -> tuple[float, list[float], float]:
+        """Keep surrogate scalar cost consistent with the R-target objective."""
+        R, T = self._rt(layers)
+        residuals = build_maxmin_r_residuals(
+            layers,
+            self.rbands,
+            self.wavelengths,
+            R,
+            thickness_weight=self.thickness_weight,
+        )
+        return (
+            0.5 * sum(value * value for value in residuals),
+            band_merit_values(self.bands, self.wavelengths, R, T),
+            sum(thickness for _, thickness in layers),
+        )
+
 
 def nk_table(
     incident: StackRow, films: list[StackRow], substrate: StackRow
@@ -836,6 +861,32 @@ def run(stack_path: str, cfg_path: str) -> int:
         cfg = json.load(fh)
 
     incident, film_rows, substrate = load_stack_txt(stack_path)
+    layer_search_raw = cfg.get("layer_search", {})
+    layer_search_flag = layer_search_raw is True
+    if layer_search_flag:
+        layer_search_raw = {}
+    if not isinstance(layer_search_raw, dict):
+        raise ValueError("layer_search must be a JSON object or true")
+    layer_search_enabled = bool(
+        layer_search_flag
+        or layer_search_raw.get("enabled", bool(layer_search_raw))
+    )
+    if layer_search_enabled and bool(cfg.get("use_needle", False)):
+        raise ValueError("layer_search and use_needle cannot both be enabled")
+    search_materials = (
+        [
+            str(value)
+            for value in layer_search_raw.get(
+                "materials",
+                [
+                    cfg.get("high_index", "tio2"),
+                    cfg.get("low_index", "sio2"),
+                ],
+            )
+        ]
+        if layer_search_enabled
+        else []
+    )
     nk_source = parse_nk_source(cfg)
     ref_nm = float(cfg.get("nk_ref_wavelength_nm", _NK_REF_NM_DEFAULT))
     ref_wl = ref_nm * _NM
@@ -844,12 +895,25 @@ def run(stack_path: str, cfg_path: str) -> int:
         incident.material,
         *[r.material for r in film_rows],
         substrate.material,
+        *search_materials,
     ]
     if nk_source == "library":
         require_library_materials(*material_names)
         nk = library_nk_table(material_names, ref_wavelength_m=ref_wl)
     else:
         nk = nk_table(incident, film_rows, substrate)
+        missing_search_materials = [
+            material
+            for material in search_materials
+            if dsp.normalize_material_name(material) not in nk
+            and material.lower() not in nk
+        ]
+        if missing_search_materials:
+            raise ValueError(
+                "nk_source=fixed requires layer_search materials to appear "
+                "in the input stack: "
+                + ", ".join(missing_search_materials)
+            )
 
     # Only coating layers are free; incident + substrate stay fixed.
     layers_file = [(r.material, r.thickness_m) for r in film_rows]
@@ -858,6 +922,15 @@ def run(stack_path: str, cfg_path: str) -> int:
     film_indices = [r.index for r in film_rows]
     free_indices = list(range(len(layers0)))
     use_needle = bool(cfg.get("use_needle", False))
+    layer_search_config = (
+        LayerSearchConfig.from_mapping(
+            layer_search_raw,
+            layers0,
+            default_materials=search_materials,
+        )
+        if layer_search_enabled
+        else None
+    )
 
     method = str(cfg.get("method", "auto")).lower()
     multistart_method = str(cfg.get("multistart_method", "trf")).lower()
@@ -1153,6 +1226,15 @@ def run(stack_path: str, cfg_path: str) -> int:
         f"  free coating layers: {len(layers0)}  "
         f"(incident/substrate thicknesses not optimised)"
     )
+    if layer_search_config is not None:
+        print(
+            f"  layer_search: pareto_beam  "
+            f"layers={layer_search_config.min_layers}.."
+            f"{layer_search_config.max_layers}  "
+            f"beam={layer_search_config.beam_width}  "
+            f"generations={layer_search_config.max_generations}  "
+            f"final_top_k={layer_search_config.final_top_k}"
+        )
     print(f"  init: {init_note}")
     if init_note.startswith("random"):
         print("  init thicknesses (nm):")
@@ -1187,7 +1269,11 @@ def run(stack_path: str, cfg_path: str) -> int:
         incident=incident,
         substrate=substrate,
         nk=nk,
-        film_indices=None if use_needle else film_indices,
+        film_indices=(
+            None
+            if use_needle or layer_search_config is not None
+            else film_indices
+        ),
         method=method,
         enabled=checkpoint_on_best,
         plot_rt_live=checkpoint_plot_rt,
@@ -1209,7 +1295,19 @@ def run(stack_path: str, cfg_path: str) -> int:
     )
     print_band_report("Before", layers0, rbands, opt.wavelengths, opt._rt(layers0)[0])
 
-    if use_needle:
+    layer_search_result = None
+    if layer_search_config is not None:
+        layer_search_result = ParetoBeamLayerSearch(
+            opt, layer_search_config
+        ).run(layers0, verbose=True)
+        result = layer_search_result.result
+        ranking_csv, ranking_json = write_layer_search_results(
+            os.path.join(out_dir, "layer_search_ranking"),
+            layer_search_result,
+        )
+        print(f"  wrote {ranking_csv}")
+        print(f"  wrote {ranking_json}")
+    elif use_needle:
         synthesizer = NeedleSynthesizer(
             opt,
             high_index=str(cfg.get("high_index", "tio2")),
