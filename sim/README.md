@@ -92,7 +92,12 @@ sim/
   "thickness_weight": 0.0,
   "adam_lr_nm": 2.0,
   "min_thickness_nm": 8,
+  "max_total_thickness_nm": 1800,
   "thickness_bounds_nm": {
+    "tio2": [8, 500],
+    "sio2": [8, 550]
+  },
+  "multistart_sampling_bounds_nm": {
     "tio2": [40, 180],
     "sio2": [60, 250]
   },
@@ -120,7 +125,9 @@ sim/
 - **`R_target`**：写在每个 `bands[]` 上，反射率目标 ∈ [0, 1]；省略时由 `objective` 得到 1（maximize）或 0（minimize）
 - **`nk_source`**：`library`（默认，按材料名从色散库读 n(λ),k(λ)）或 `fixed`（用文本膜系中的常数 n,k）；也可用 `use_fixed_nk: true`
 - **`min_thickness_nm`**：单层最小厚度（nm，默认 `8`）；优化时抬高各材料厚度下界
-- **`thickness_bounds_nm`**：按材料设置 `[下限, 上限]`（nm）；同时约束多起点采样和后续局部/全局优化，未列出的材料沿用内置范围
+- **`max_total_thickness_nm`**：所有膜层总厚度的硬上限（nm）；超限候选会在保持单层边界的同时投影回可行域
+- **`thickness_bounds_nm`**：按材料设置优化全过程的硬边界 `[下限, 上限]`（nm）；未列出的材料沿用内置范围
+- **`multistart_sampling_bounds_nm`**：仅设置 Latin-hypercube 初值采样范围；必须位于对应的 `thickness_bounds_nm` 之内，未列出的材料沿用厚度硬边界
 - **`mini_batch`**：`true` 或嵌套对象 `{"batch_size", "n_batches", "n_epochs", "shuffle_seed"}`，仅 `method=adam` 时生效
 - **`checkpoint_on_best`**（默认 `true`）：运行中 best 变好时更新 `stack_best.txt`，并追加 `best_updates.csv`
 - **`use_cuda`**：`true` 时走 CuPy 批量 TMM（仅 NVIDIA CUDA；macOS 不可用）

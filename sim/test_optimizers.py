@@ -12,6 +12,7 @@ from lm_optimizer import (
     LMThicknessOptimizer,
     build_residuals,
     is_better_checkpoint,
+    parse_multistart_sampling_bounds_nm,
     parse_thickness_bounds_nm,
 )
 from multistart_optimize import prepare_inputs
@@ -71,6 +72,65 @@ class ResidualTests(unittest.TestCase):
 
 
 class TRFTests(unittest.TestCase):
+    def test_hard_total_thickness_cap_projects_all_free_layers(self):
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.4)],
+            max_total_thickness=250e-9,
+        )
+        projected = optimizer._project(
+            ["x", "x"],
+            [200e-9, 200e-9],
+            [0, 1],
+        )
+        self.assertAlmostEqual(sum(projected) * 1e9, 250.0, places=6)
+        self.assertAlmostEqual(projected[0] * 1e9, 125.0, places=6)
+        self.assertAlmostEqual(projected[1] * 1e9, 125.0, places=6)
+
+    def test_hard_total_thickness_cap_preserves_fixed_layers(self):
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.4)],
+            max_total_thickness=250e-9,
+        )
+        projected = optimizer._project(
+            ["x", "x"],
+            [150e-9, 150e-9],
+            [0],
+        )
+        self.assertAlmostEqual(projected[0] * 1e9, 100.0, places=6)
+        self.assertAlmostEqual(projected[1] * 1e9, 150.0, places=6)
+
+    def test_infeasible_total_thickness_cap_is_rejected(self):
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.4)],
+            max_total_thickness=15e-9,
+        )
+        with self.assertRaisesRegex(ValueError, "need at least 20.000 nm"):
+            optimizer._project(["x", "x"], [100e-9, 100e-9], [0, 1])
+
+    def test_trf_result_respects_hard_total_thickness_cap(self):
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.8)],
+            method="trf",
+            wavelength_step=20e-9,
+            thickness_weight=0.0,
+            max_iter=30,
+            max_total_thickness=250e-9,
+        )
+        result = optimizer.optimize(
+            [("x", 200e-9), ("x", 200e-9)],
+            verbose=False,
+        )
+        self.assertLessEqual(
+            sum(d for _, d in result.layers),
+            250e-9 + 1e-15,
+        )
+        self.assertAlmostEqual(result.layers[0][1] * 1e9, 240.0, places=3)
+        self.assertAlmostEqual(result.layers[1][1] * 1e9, 10.0, places=3)
+
     def test_json_thickness_bounds_constrain_multistart_and_local_search(self):
         bounds = parse_thickness_bounds_nm({"x": [100, 150]})
         optimizer = LMThicknessOptimizer(
@@ -89,6 +149,38 @@ class TRFTests(unittest.TestCase):
         self.assertGreaterEqual(result.layers[0][1], 100e-9)
         self.assertLessEqual(result.layers[0][1], 150e-9 + 1e-15)
         self.assertAlmostEqual(result.layers[0][1] * 1e9, 150.0, places=3)
+
+    def test_multistart_sampling_bounds_do_not_limit_local_search(self):
+        hard_bounds = parse_thickness_bounds_nm({"x": [50, 450]})
+        sampling_bounds = parse_multistart_sampling_bounds_nm({"x": [100, 150]})
+        optimizer = LMThicknessOptimizer(
+            LinearReflectanceCalculator(),
+            [BandSpec(500e-9, 600e-9, R_target=0.8)],
+            method="multistart",
+            multistart_n=4,
+            multistart_seed=2,
+            wavelength_step=20e-9,
+            thickness_weight=0.0,
+            max_iter=20,
+            thickness_bounds=hard_bounds,
+            multistart_sampling_bounds=sampling_bounds,
+        )
+        sample_lo, sample_hi = optimizer.multistart_bounds_for("x")
+        self.assertAlmostEqual(sample_lo * 1e9, 100.0)
+        self.assertAlmostEqual(sample_hi * 1e9, 150.0)
+        result = optimizer.optimize([("x", 120e-9)], verbose=False)
+        self.assertAlmostEqual(result.layers[0][1] * 1e9, 400.0, places=3)
+
+    def test_sampling_bounds_must_be_inside_thickness_bounds(self):
+        with self.assertRaisesRegex(ValueError, "must be inside"):
+            LMThicknessOptimizer(
+                LinearReflectanceCalculator(),
+                [BandSpec(500e-9, 600e-9, R_target=0.4)],
+                thickness_bounds=parse_thickness_bounds_nm({"x": [50, 200]}),
+                multistart_sampling_bounds=parse_multistart_sampling_bounds_nm(
+                    {"x": [40, 150]}
+                ),
+            )
 
     def test_invalid_json_thickness_bounds_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "min_nm < max_nm"):

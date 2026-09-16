@@ -714,8 +714,10 @@ python3 sim/optimize_film.py \
 | `method` | `auto` | 多起点 TRF，未达标或改善不足时 DE 回退 |
 | `multistart_n` | 4–12 | Latin-hypercube 初值数量 |
 | `multistart_method` | `trf` | 每个初值采用的有界局部方法 |
+| `multistart_sampling_bounds_nm` | 按设计设定 | 仅限制 Latin-hypercube 初值采样；局部优化仍使用厚度硬边界 |
 | `auto_min_relative_improvement` | 0.01 | 触发 DE 回退的最小相对改善 |
 | `min_thickness_nm` | 8（默认） | 单层最小厚度（nm）；抬高优化厚度下界 |
+| `max_total_thickness_nm` | 按工艺设定 | 所有膜层总厚度硬上限；候选点超限时投影回可行域 |
 | `nk_source` | `library`（默认） / `fixed` | `library`：按材料名从色散库读 n(λ),k(λ)；`fixed`：用文本膜系常数 n,k |
 | `de_popsize` | 12–20 | DE 种群规模 |
 | `global_polish_method` | `trf` | DE/退火后局部精修 |

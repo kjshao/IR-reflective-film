@@ -169,12 +169,15 @@ def resolve_global_polish_method(
     return "none"
 
 
-def parse_thickness_bounds_nm(value) -> dict[str, tuple[float, float]]:
-    """Parse JSON per-material thickness bounds and convert nm to metres."""
+def parse_material_bounds_nm(
+    value,
+    config_name: str,
+) -> dict[str, tuple[float, float]]:
+    """Parse JSON per-material bounds and convert nanometres to metres."""
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise ValueError("thickness_bounds_nm must be a JSON object")
+        raise ValueError(f"{config_name} must be a JSON object")
     parsed: dict[str, tuple[float, float]] = {}
     for material, bounds in value.items():
         if (
@@ -184,25 +187,33 @@ def parse_thickness_bounds_nm(value) -> dict[str, tuple[float, float]]:
             or isinstance(bounds[1], bool)
         ):
             raise ValueError(
-                f"thickness_bounds_nm.{material} must be [min_nm, max_nm]"
+                f"{config_name}.{material} must be [min_nm, max_nm]"
             )
         try:
             lo_nm, hi_nm = float(bounds[0]), float(bounds[1])
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"thickness_bounds_nm.{material} must contain numbers"
+                f"{config_name}.{material} must contain numbers"
             ) from exc
         if not math.isfinite(lo_nm) or not math.isfinite(hi_nm):
             raise ValueError(
-                f"thickness_bounds_nm.{material} must contain finite numbers"
+                f"{config_name}.{material} must contain finite numbers"
             )
         if lo_nm < 0.0 or hi_nm <= lo_nm:
             raise ValueError(
-                f"thickness_bounds_nm.{material} requires 0 <= min_nm < max_nm"
+                f"{config_name}.{material} requires 0 <= min_nm < max_nm"
             )
         key = str(material).lower().replace("-", "_")
         parsed[key] = (lo_nm * 1e-9, hi_nm * 1e-9)
     return parsed
+
+
+def parse_thickness_bounds_nm(value) -> dict[str, tuple[float, float]]:
+    return parse_material_bounds_nm(value, "thickness_bounds_nm")
+
+
+def parse_multistart_sampling_bounds_nm(value) -> dict[str, tuple[float, float]]:
+    return parse_material_bounds_nm(value, "multistart_sampling_bounds_nm")
 
 
 def _bounds_for(
@@ -464,6 +475,9 @@ class LMThicknessOptimizer:
         multistart_seed: int | None = 0,
         multistart_gpu_ids: Sequence[int] | None = None,
         multistart_progress_interval_s: float = 10.0,
+        multistart_sampling_bounds: (
+            dict[str, tuple[float, float]] | None
+        ) = None,
         auto_de_fallback: bool = True,
         auto_min_relative_improvement: float = 0.01,
         # Mini-batch Adam (wavelength subsets). Off by default → full-grid Adam.
@@ -489,6 +503,8 @@ class LMThicknessOptimizer:
         # Minimum free-layer thickness (metres). Unit in JSON configs: nm
         # via ``min_thickness_nm`` (default 8 nm). Raises per-material floors.
         min_thickness: float = 8e-9,
+        # Hard upper bound for the sum of all layer thicknesses.
+        max_total_thickness: float | None = None,
         # Optional per-material (lo, hi) bounds in metres. JSON configs use
         # ``thickness_bounds_nm`` and are converted before construction.
         thickness_bounds: dict[str, tuple[float, float]] | None = None,
@@ -547,6 +563,16 @@ class LMThicknessOptimizer:
             0.0, float(auto_min_relative_improvement)
         )
         self.min_thickness = float(min_thickness)
+        self.max_total_thickness = (
+            None
+            if max_total_thickness is None
+            else float(max_total_thickness)
+        )
+        if (
+            self.max_total_thickness is not None
+            and self.max_total_thickness <= 0.0
+        ):
+            raise ValueError("max_total_thickness must be positive")
         self.thickness_bounds = {
             str(mat).lower().replace("-", "_"): (float(bounds[0]), float(bounds[1]))
             for mat, bounds in (thickness_bounds or {}).items()
@@ -559,6 +585,24 @@ class LMThicknessOptimizer:
             if self.min_thickness >= hi:
                 raise ValueError(
                     f"min_thickness must be below the upper bound for {mat!r}"
+                )
+        self.multistart_sampling_bounds = {
+            str(mat).lower().replace("-", "_"): (float(bounds[0]), float(bounds[1]))
+            for mat, bounds in (multistart_sampling_bounds or {}).items()
+        }
+        for mat, (sample_lo, sample_hi) in self.multistart_sampling_bounds.items():
+            if sample_lo < 0.0 or sample_hi <= sample_lo:
+                raise ValueError(
+                    f"multistart sampling bound for {mat!r} requires "
+                    "0 <= lower < upper"
+                )
+            hard_lo, hard_hi = self.bounds_for(mat)
+            if sample_lo < hard_lo or sample_hi > hard_hi:
+                raise ValueError(
+                    f"multistart sampling bound for {mat!r} "
+                    f"[{sample_lo * 1e9:g}, {sample_hi * 1e9:g}] nm must be "
+                    f"inside its thickness bound "
+                    f"[{hard_lo * 1e9:g}, {hard_hi * 1e9:g}] nm"
                 )
         self.mini_batch = bool(mini_batch)
         self.batch_size = int(batch_size)
@@ -728,11 +772,65 @@ class LMThicknessOptimizer:
             self.thickness_bounds,
         )
 
-    def _project(self, materials: Sequence[str], x: list[float]) -> list[float]:
-        out = []
+    def multistart_bounds_for(self, material: str) -> tuple[float, float]:
+        key = material.lower().replace("-", "_")
+        return self.multistart_sampling_bounds.get(key, self.bounds_for(material))
+
+    def _project(
+        self,
+        materials: Sequence[str],
+        x: list[float],
+        adjustable_indices: Sequence[int] | None = None,
+    ) -> list[float]:
+        """Project onto per-layer bounds and the optional hard total cap."""
+        out: list[float] = []
+        bounds: list[tuple[float, float]] = []
         for mat, d in zip(materials, x):
             lo, hi = self.bounds_for(mat)
+            bounds.append((lo, hi))
             out.append(min(hi, max(lo, d)))
+        cap = self.max_total_thickness
+        if cap is None or sum(out) <= cap + 1e-15:
+            return out
+
+        adjustable = (
+            list(range(len(out)))
+            if adjustable_indices is None
+            else list(adjustable_indices)
+        )
+        adjustable_set = set(adjustable)
+        fixed_total = sum(
+            value for i, value in enumerate(out) if i not in adjustable_set
+        )
+        available = cap - fixed_total
+        min_adjustable = sum(bounds[i][0] for i in adjustable)
+        if available < min_adjustable - 1e-15:
+            min_total = fixed_total + min_adjustable
+            raise ValueError(
+                "max_total_thickness is infeasible for the fixed layers and "
+                f"per-layer lower bounds: need at least {min_total * 1e9:.3f} nm, "
+                f"got {cap * 1e9:.3f} nm"
+            )
+
+        # Euclidean projection of adjustable values onto
+        # sum(x_adjustable) <= available with box lower/upper bounds.
+        lambda_lo = 0.0
+        lambda_hi = max(
+            (out[i] - bounds[i][0] for i in adjustable),
+            default=0.0,
+        )
+        for _ in range(80):
+            lam = 0.5 * (lambda_lo + lambda_hi)
+            projected_sum = sum(
+                max(bounds[i][0], out[i] - lam) for i in adjustable
+            )
+            if projected_sum > available:
+                lambda_lo = lam
+            else:
+                lambda_hi = lam
+        for i in adjustable:
+            lo, hi = bounds[i]
+            out[i] = min(hi, max(lo, out[i] - lambda_hi))
         return out
 
     def _jacobian(
@@ -753,16 +851,15 @@ class LMThicknessOptimizer:
             xp = list(x)
             if x[j] + step <= hi:
                 xp[j] = x[j] + step
-                denom = step
             else:
                 xp[j] = max(lo, x[j] - step)
-                denom = x[j] - xp[j]
-                if denom <= 0:
-                    continue
+            xp = self._project(materials, xp, free)
+            denom = xp[j] - x[j]
+            if abs(denom) <= 1e-30:
+                continue
             rp = self.residuals(list(zip(materials, xp)))
-            sign = 1.0 if xp[j] > x[j] else -1.0
             for i in range(m):
-                J[i][j] = sign * (rp[i] - r0[i]) / abs(denom)
+                J[i][j] = (rp[i] - r0[i]) / denom
         return J, free
 
     @staticmethod
@@ -813,8 +910,9 @@ class LMThicknessOptimizer:
         ``accept_fn(layers) -> bool``: optional hard filter (e.g. keep IR stop).
         """
         materials = [m for m, _ in layers]
-        x = self._project(materials, [d for _, d in layers])
+        x = [d for _, d in layers]
         free = list(range(len(x))) if free_indices is None else list(free_indices)
+        x = self._project(materials, x, free)
         best = list(zip(materials, x))
         if accept_fn is not None and not accept_fn(best):
             # Starting point must be acceptable; otherwise ignore the filter.
@@ -835,7 +933,7 @@ class LMThicknessOptimizer:
                 for delta in (step, -step, 2 * step, -2 * step):
                     trial_x = list(x)
                     trial_x[j] = trial_x[j] + delta
-                    trial_x = self._project(materials, trial_x)
+                    trial_x = self._project(materials, trial_x, free)
                     if abs(trial_x[j] - x[j]) < 1e-15:
                         continue
                     trial = list(zip(materials, trial_x))
@@ -888,16 +986,14 @@ class LMThicknessOptimizer:
             xp = list(x)
             if x[j] + step <= hi:
                 xp[j] = x[j] + step
-                denom = step
-                sign = 1.0
             else:
                 xp[j] = max(lo, x[j] - step)
-                denom = x[j] - xp[j]
-                if denom <= 0:
-                    continue
-                sign = -1.0
+            xp = self._project(materials, xp, free)
+            denom = xp[j] - x[j]
+            if abs(denom) <= 1e-30:
+                continue
             cp = self.cost(list(zip(materials, xp)))
-            g[j] = sign * (cp - c0) / abs(denom)
+            g[j] = (cp - c0) / denom
         return g, free
 
     def optimize(
@@ -980,8 +1076,9 @@ class LMThicknessOptimizer:
         """
         spo = _require_scipy()
         materials = [m for m, _ in layers]
-        x0 = self._project(materials, [d for _, d in layers])
+        x0 = [d for _, d in layers]
         free = list(range(len(x0))) if free_indices is None else list(free_indices)
+        x0 = self._project(materials, x0, free)
         layers0 = list(zip(materials, x0))
         start_r = self.residuals(layers0)
         start_cost = 0.5 * sum(v * v for v in start_r)
@@ -1009,7 +1106,7 @@ class LMThicknessOptimizer:
             x = list(x0)
             for value, j in zip(y, free):
                 x[j] = float(value) / scale
-            return self._project(materials, x)
+            return self._project(materials, x, free)
 
         n_eval = 0
 
@@ -1103,8 +1200,9 @@ class LMThicknessOptimizer:
     ) -> OptimResult:
         """Latin-hypercube multi-start followed by a bounded local method."""
         materials = [m for m, _ in layers]
-        x0 = self._project(materials, [d for _, d in layers])
+        x0 = [d for _, d in layers]
         free = list(range(len(x0))) if free_indices is None else list(free_indices)
+        x0 = self._project(materials, x0, free)
         if not free:
             return self._optimize_trf(
                 layers, free_indices=free_indices, verbose=verbose
@@ -1127,7 +1225,7 @@ class LMThicknessOptimizer:
         for i in range(n_random):
             x = list(x0)
             for j in free:
-                lo, hi = self.bounds_for(materials[j])
+                lo, hi = self.multistart_bounds_for(materials[j])
                 u = (per_dim_bins[j][i] + rng.random()) / max(1, n_random)
                 x[j] = lo + u * (hi - lo)
             starts.append(x)
@@ -1314,8 +1412,9 @@ class LMThicknessOptimizer:
     ):
         """Shared scaffolding for scipy global methods on free thicknesses."""
         materials = [m for m, _ in layers]
-        x0_full = self._project(materials, [d for _, d in layers])
+        x0_full = [d for _, d in layers]
         free = list(range(len(x0_full))) if free_indices is None else list(free_indices)
+        x0_full = self._project(materials, x0_full, free)
         if not free:
             raise ValueError("global optimisation needs at least one free layer")
         bounds = [self.bounds_for(materials[j]) for j in free]
@@ -1347,7 +1446,7 @@ class LMThicknessOptimizer:
             x = list(x0_full)
             for k, j in enumerate(free):
                 x[j] = float(x_free[k])
-            x = self._project(materials, x)
+            x = self._project(materials, x, free)
             layers_now = list(zip(materials, x))
             c = self.cost(layers_now)
             best["n_eval"] += 1
@@ -1618,7 +1717,7 @@ class LMThicknessOptimizer:
         x = list(_x0_full)
         for k, j in enumerate(free):
             x[j] = float(result.x[k])
-        x = self._project(materials, x)
+        x = self._project(materials, x, free)
         layers_final = list(zip(materials, x))
         result_cost = self.cost(layers_final)
         # Prefer the best point seen during search (polish can move off it).
@@ -1713,7 +1812,7 @@ class LMThicknessOptimizer:
             x_tmp = list(_x0_full)
             for k, j in enumerate(free):
                 x_tmp[j] = float(x_free[k])
-            x_tmp = self._project(materials, x_tmp)
+            x_tmp = self._project(materials, x_tmp, free)
             print(
                 f"    DA step {step_count['n']:4d} [{name:9s}]: "
                 f"f={float(f):.6e}  best={best['cost']:.6e}  "
@@ -1741,7 +1840,7 @@ class LMThicknessOptimizer:
         x = list(_x0_full)
         for k, j in enumerate(free):
             x[j] = float(result.x[k])
-        x = self._project(materials, x)
+        x = self._project(materials, x, free)
         layers_final = list(zip(materials, x))
         result_cost = self.cost(layers_final)
         if best["cost"] <= result_cost + 1e-15:
@@ -1818,7 +1917,11 @@ class LMThicknessOptimizer:
                 step = -max_step
             delta[j] = -step
 
-        x = self._project(materials, [x[i] + delta[i] for i in range(len(x))])
+        x = self._project(
+            materials,
+            [x[i] + delta[i] for i in range(len(x))],
+            free,
+        )
         layers_now = list(zip(materials, x))
         r = self.residuals(layers_now)
         cost = self.cost(layers_now)
@@ -1834,8 +1937,9 @@ class LMThicknessOptimizer:
     ) -> OptimResult:
         """Projected Polak–Ribière nonlinear CG on ``self.cost()``."""
         materials = [m for m, _ in layers]
-        x = self._project(materials, [d for _, d in layers])
+        x = [d for _, d in layers]
         free = list(range(len(x))) if free_indices is None else list(free_indices)
+        x = self._project(materials, x, free)
         layers0 = list(zip(materials, x))
         r = self.residuals(layers0)
         cost = self.cost(layers0)
@@ -1915,7 +2019,9 @@ class LMThicknessOptimizer:
             step_norm = 0.0
             for _ in range(20):
                 x_trial = self._project(
-                    materials, [x[i] + alpha * d[i] for i in range(len(x))]
+                    materials,
+                    [x[i] + alpha * d[i] for i in range(len(x))],
+                    free,
                 )
                 layers_trial = list(zip(materials, x_trial))
                 cost_trial = self.cost(layers_trial)
@@ -1938,7 +2044,9 @@ class LMThicknessOptimizer:
                 d = _neg_grad()
                 alpha = min(0.25 * alpha0 / max(d_abs, 1e-30), max_step / max(d_abs, 1e-30))
                 x_trial = self._project(
-                    materials, [x[i] + alpha * d[i] for i in range(len(x))]
+                    materials,
+                    [x[i] + alpha * d[i] for i in range(len(x))],
+                    free,
                 )
                 layers_trial = list(zip(materials, x_trial))
                 cost_trial = self.cost(layers_trial)
@@ -2042,8 +2150,9 @@ class LMThicknessOptimizer:
         """Bounded L-BFGS-B on ``self.cost()`` via scipy (needs scipy)."""
         spo = _require_scipy()
         materials = [m for m, _ in layers]
-        x = self._project(materials, [d for _, d in layers])
+        x = [d for _, d in layers]
         free = list(range(len(x))) if free_indices is None else list(free_indices)
+        x = self._project(materials, x, free)
         if not free:
             layers0 = list(zip(materials, x))
             c0 = self.cost(layers0)
@@ -2079,7 +2188,7 @@ class LMThicknessOptimizer:
             xf = list(state["x"])
             for j, v in zip(free, x_free):
                 xf[j] = float(v)
-            return self._project(materials, xf)
+            return self._project(materials, xf, free)
 
         if verbose:
             print(
@@ -2224,8 +2333,9 @@ class LMThicknessOptimizer:
     ) -> OptimResult:
         """Adam on layer thicknesses (projected onto material bounds)."""
         materials = [m for m, _ in layers]
-        x = self._project(materials, [d for _, d in layers])
+        x = [d for _, d in layers]
         free = list(range(len(x))) if free_indices is None else list(free_indices)
+        x = self._project(materials, x, free)
         layers0 = list(zip(materials, x))
         r = self.residuals(layers0)
         cost = self.cost(layers0)
@@ -2366,8 +2476,9 @@ class LMThicknessOptimizer:
             )
 
         materials = [m for m, _ in layers]
-        x = self._project(materials, [d for _, d in layers])
+        x = [d for _, d in layers]
         free = list(range(len(x))) if free_indices is None else list(free_indices)
+        x = self._project(materials, x, free)
 
         self._set_wavelengths(full_wls)
         layers0 = list(zip(materials, x))
@@ -2541,8 +2652,9 @@ class LMThicknessOptimizer:
         verbose: bool = True,
     ) -> OptimResult:
         materials = [m for m, _ in layers]
-        x = self._project(materials, [d for _, d in layers])
+        x = [d for _, d in layers]
         free = list(range(len(x))) if free_indices is None else list(free_indices)
+        x = self._project(materials, x, free)
         lam = self.lambda0
         history: list[float] = []
         r = self.residuals(list(zip(materials, x)))
@@ -2591,7 +2703,11 @@ class LMThicknessOptimizer:
             for k, j in enumerate(free_cols):
                 delta[j] = delta_f[k]
 
-            x_trial = self._project(materials, [x[i] + delta[i] for i in range(len(x))])
+            x_trial = self._project(
+                materials,
+                [x[i] + delta[i] for i in range(len(x))],
+                free,
+            )
             r_trial = self.residuals(list(zip(materials, x_trial)))
             cost_trial = 0.5 * sum(v * v for v in r_trial)
 

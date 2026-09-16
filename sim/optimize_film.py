@@ -68,6 +68,7 @@ from lm_optimizer import (
     BandSpec,
     LMThicknessOptimizer,
     _bounds_for,
+    parse_multistart_sampling_bounds_nm,
     parse_thickness_bounds_nm,
 )
 from needle import NeedleSynthesizer
@@ -963,11 +964,19 @@ def run(stack_path: str, cfg_path: str) -> int:
         multistart_progress_interval_s=float(
             cfg.get("multistart_progress_interval_s", 10.0)
         ),
+        multistart_sampling_bounds=parse_multistart_sampling_bounds_nm(
+            cfg.get("multistart_sampling_bounds_nm")
+        ),
         auto_de_fallback=bool(cfg.get("auto_de_fallback", True)),
         auto_min_relative_improvement=float(
             cfg.get("auto_min_relative_improvement", 0.01)
         ),
         min_thickness=_NM * float(cfg.get("min_thickness_nm", 8.0)),
+        max_total_thickness=(
+            _NM * float(cfg["max_total_thickness_nm"])
+            if cfg.get("max_total_thickness_nm") is not None
+            else None
+        ),
         thickness_bounds=parse_thickness_bounds_nm(
             cfg.get("thickness_bounds_nm")
         ),
@@ -1004,6 +1013,11 @@ def run(stack_path: str, cfg_path: str) -> int:
     print(f"  config: {cfg_path}")
     print(f"  method: {method}  angle: {angle_deg:g} deg  pol: {pol}")
     print(f"  min_thickness_nm: {opt.min_thickness / _NM:g}")
+    if opt.max_total_thickness is not None:
+        print(
+            f"  max_total_thickness_nm: "
+            f"{opt.max_total_thickness / _NM:g} (hard constraint)"
+        )
     if nk_source == "library":
         print(
             f"  nk_source: library  (dispersion DB; "

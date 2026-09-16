@@ -15,6 +15,7 @@ from lm_optimizer import (
     BandSpec,
     LMThicknessOptimizer,
     OptimResult,
+    parse_multistart_sampling_bounds_nm,
     parse_thickness_bounds_nm,
 )
 from rt_calculator import RTCalculator
@@ -638,6 +639,9 @@ def make_optimizer_from_config(
         multistart_progress_interval_s=float(
             cfg.get("multistart_progress_interval_s", 10.0)
         ),
+        multistart_sampling_bounds=parse_multistart_sampling_bounds_nm(
+            cfg.get("multistart_sampling_bounds_nm")
+        ),
         auto_de_fallback=bool(cfg.get("auto_de_fallback", True)),
         auto_min_relative_improvement=float(
             cfg.get("auto_min_relative_improvement", 0.01)
@@ -662,6 +666,15 @@ def make_optimizer_from_config(
             float(cfg["min_thickness"])
             if cfg.get("min_thickness") is not None
             else 1e-9 * float(cfg.get("min_thickness_nm", 8.0))
+        ),
+        max_total_thickness=(
+            float(cfg["max_total_thickness"])
+            if cfg.get("max_total_thickness") is not None
+            else (
+                1e-9 * float(cfg["max_total_thickness_nm"])
+                if cfg.get("max_total_thickness_nm") is not None
+                else None
+            )
         ),
         thickness_bounds=(
             cfg.get("thickness_bounds")
