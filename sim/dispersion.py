@@ -293,6 +293,11 @@ def air(wl: float) -> complex:
     return complex(n, 0.0)
 
 
+def tfcalc_air(wl: float) -> complex:
+    """TFCalc constant air optical constants: n = 1, k = 0."""
+    return complex(1.0, 0.0)
+
+
 def silver(wl: float) -> complex:
     """Thermally evaporated Ag (McPeak et al. 2015); PVD-relevant.
 
@@ -446,6 +451,11 @@ def glass(wl: float) -> complex:
     return complex(n, k)
 
 
+def tfcalc_glass(wl: float) -> complex:
+    """TFCalc constant glass optical constants: n = 1.56, k = 0."""
+    return complex(1.56, 0.0)
+
+
 def pet(wl: float) -> complex:
     """Weakly dispersive fit for biaxially drawn PET, n(550 nm) ~ 1.65."""
     return _sellmeier(wl, [(1.6483, 0.01575)])
@@ -453,6 +463,7 @@ def pet(wl: float) -> complex:
 
 MATERIALS = {
     "air": air,
+    "tfcalc_air": tfcalc_air,
     "ag": silver,
     "ito": ito,
     "sio2": sio2,
@@ -469,6 +480,7 @@ MATERIALS = {
     "tfcalc_tio2_a": tfcalc_tio2_a,
     "tfcalc_tio2_rutile": tfcalc_tio2_rutile,
     "glass": glass,
+    "tfcalc_glass": tfcalc_glass,
     "pet": pet,
 }
 

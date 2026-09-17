@@ -4,6 +4,19 @@ import dispersion
 
 
 class TFCalcMaterialTests(unittest.TestCase):
+    def test_constant_tfcalc_materials(self):
+        for wavelength_nm in (1, 300, 550, 1800, 1_000_000):
+            with self.subTest(material="tfcalc-air", wavelength_nm=wavelength_nm):
+                self.assertEqual(
+                    dispersion.material_n("tfcalc-air", wavelength_nm * 1e-9),
+                    complex(1.0, 0.0),
+                )
+            with self.subTest(material="tfcalc-glass", wavelength_nm=wavelength_nm):
+                self.assertEqual(
+                    dispersion.material_n("tfcalc-glass", wavelength_nm * 1e-9),
+                    complex(1.56, 0.0),
+                )
+
     def test_supplied_tfcalc_points(self):
         tables = {
             "tfcalc-sio2": (

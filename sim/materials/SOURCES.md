@@ -21,6 +21,8 @@ under explicit keys. Numeric tables are derived from the public-domain
 | `tio2_amorphous` | Amorphous TiO₂ | Jolivet et al. 2023 @ 200 °C | ALD; NIR Sellmeier beyond ~0.82 µm |
 | `tio2_a` / `tio2-a` | Anatase TiO₂ | Jolivet et al. 2023 @ 300 °C | annealed crystalline film; higher n than as-deposited PVD |
 | `tio2_rutile` | Rutile (ordinary) | Jellison 2024 + Bond 1965 | **crystal upper bound**, not typical as-deposited PVD |
+| `tfcalc_air` / `tfcalc-air` | Air | User-supplied TFCalc constants | all wavelengths: n=1, k=0 |
+| `tfcalc_glass` / `tfcalc-glass` | Glass | User-supplied TFCalc constants | all wavelengths: n=1.56, k=0 |
 | `tfcalc_sio2` / `tfcalc-sio2` | SiO₂ | User-supplied TFCalc table | tabulated 0.310–2.066 µm |
 | `tfcalc_tio2_a` / `tfcalc-tio2-a` | Anatase TiO₂ | User-supplied TFCalc table | tabulated 0.300–1.800 µm |
 | `tfcalc_tio2_rutile` / `tfcalc-tio2-rutile` | Rutile TiO₂ | User-supplied TFCalc table | tabulated 0.300–1.800 µm |
