@@ -46,33 +46,52 @@ COLOR_R = "#3d6f9c"  # soft slate blue
 COLOR_T = "#c17a3a"  # soft amber
 COLOR_A = "#6a8f6a"  # sage green
 
-# Layer bar / legend fills: distinct from R/T curves and band shading.
+# Layer bar / legend fills: same soft blue / warm yellow as band windows.
 # One stable color per material so stack bars and legends always match.
 _LAYER_FACE_COLORS = {
-    "tio2": "#7aa7c7",
-    "tio2_pvd": "#7aa7c7",
-    "tio2_eb": "#6b97b8",
-    "tio2_amorphous": "#8bb4cf",
-    "tio2_a": "#7aa7c7",
-    "tio2_rutile": "#5f8aab",
-    "sio2": "#c9a46c",
-    "sio2_fused": "#c9a46c",
-    "sio2_pvd": "#bb955c",
-    "ito": "#7f9f78",
-    "ag": "#a888b0",
-    "glass": "#9e9486",
-    "pet": "#b7a56e",
-    "air": "#d7d5d1",
+    "tio2": BAND_BG_COLORS[0],
+    "tio2_pvd": BAND_BG_COLORS[0],
+    "tio2_eb": "#cfe0f0",
+    "tio2_amorphous": "#e0eef8",
+    "tio2_a": BAND_BG_COLORS[0],
+    "tio2_rutile": "#c5d8ea",
+    "sio2": BAND_BG_COLORS[1],
+    "sio2_fused": BAND_BG_COLORS[1],
+    "sio2_pvd": "#efdcc8",
+    "ito": BAND_BG_COLORS[2],
+    "ag": BAND_BG_COLORS[3],
+    "glass": BAND_BG_COLORS[7],
+    "pet": BAND_BG_COLORS[4],
+    "air": "#f7f7f5",
 }
-_LAYER_FALLBACK = (
-    "#7aa7c7",
-    "#c9a46c",
-    "#7f9f78",
-    "#a888b0",
-    "#b7a56e",
-    "#c48b8b",
-    "#6f9e97",
-    "#9e9486",
+_LAYER_FALLBACK = BAND_BG_COLORS
+
+# Stronger strokes for n/k curves (pastel bar fills are too light as lines).
+_LAYER_LINE_COLORS = {
+    "tio2": "#3d6f9c",
+    "tio2_pvd": "#3d6f9c",
+    "tio2_eb": "#355f88",
+    "tio2_amorphous": "#4a7ca8",
+    "tio2_a": "#3d6f9c",
+    "tio2_rutile": "#2f587c",
+    "sio2": "#c17a3a",
+    "sio2_fused": "#c17a3a",
+    "sio2_pvd": "#a86830",
+    "ito": "#5f7f58",
+    "ag": "#7a5f84",
+    "glass": "#6e6558",
+    "pet": "#8a7a48",
+    "air": "#8a8a8a",
+}
+_LAYER_LINE_FALLBACK = (
+    "#3d6f9c",
+    "#c17a3a",
+    "#5f7f58",
+    "#7a5f84",
+    "#8a7a48",
+    "#8a5f5f",
+    "#4f7a72",
+    "#6e6558",
 )
 
 # Typography — keep readable on saved PNGs (dpi=150).
@@ -80,9 +99,11 @@ FONT_TITLE = 15
 FONT_LABEL = 13
 FONT_TICK = 12
 FONT_LEGEND = 12
-FONT_LAYER = 13
-FONT_LAYER_SMALL = 12
+FONT_LAYER = FONT_TICK  # stack thickness labels match R/T legend/tick size
+FONT_LAYER_SMALL = FONT_TICK
 LINEWIDTH = 2.15
+# Fraction of total thickness below which the number is drawn outside with an arrow.
+_STACK_OUTSIDE_FRAC = 0.045
 
 _MPL_CONFIGURED = False
 
@@ -390,8 +411,122 @@ def layer_face_color(material: str, index: int = 0) -> str:
 
 
 def material_line_color(material: str, index: int = 0) -> str:
-    """Stroke color for n/k curves; same identity mapping as stack fills."""
-    return layer_face_color(material, index)
+    """Stroke color for n/k curves; keyed like stack fills but darker."""
+    del index
+    key = dsp.normalize_material_name(material)
+    if key in _LAYER_LINE_COLORS:
+        return _LAYER_LINE_COLORS[key]
+    digest = sum((i + 1) * ord(ch) for i, ch in enumerate(key))
+    return _LAYER_LINE_FALLBACK[digest % len(_LAYER_LINE_FALLBACK)]
+
+
+def _format_stack_thickness(width_nm: float) -> str:
+    """Thickness label without units."""
+    if width_nm >= 100.0:
+        return f"{width_nm:.0f}"
+    if width_nm >= 10.0:
+        return f"{width_nm:.1f}"
+    return f"{width_nm:.2f}"
+
+
+def draw_stack_thickness(
+    ax,
+    layers: list[tuple[str, float]],
+    *,
+    label: str = "",
+    y: float = 0.0,
+    height: float = 0.78,
+    show_values: bool = True,
+) -> float:
+    """Draw one horizontal stacked bar of physical thicknesses (nm).
+
+    Thickness numbers use the same font size as R/T labels. Thin layers are
+    labeled outside the bar with an arrow. Returns total thickness in nm.
+    """
+    if not layers:
+        ax.text(
+            0.5,
+            y,
+            "(no layers)",
+            ha="center",
+            va="center",
+            fontsize=FONT_LABEL,
+            transform=ax.get_yaxis_transform(),
+        )
+        return 0.0
+
+    total_nm = sum(d for _, d in layers) / _NM
+    x = 0.0
+    outside_index = 0
+    for mat, d in layers:
+        w = d / _NM
+        color = layer_face_color(mat)
+        ax.barh(
+            y,
+            w,
+            left=x,
+            height=height,
+            color=color,
+            edgecolor="#5a5a5a",
+            linewidth=0.7,
+            align="center",
+        )
+        if show_values and total_nm > 0 and w > 0.0:
+            text = _format_stack_thickness(w)
+            frac = w / total_nm
+            center_x = x + 0.5 * w
+            if frac >= _STACK_OUTSIDE_FRAC:
+                ax.text(
+                    center_x,
+                    y,
+                    text,
+                    ha="center",
+                    va="center",
+                    fontsize=FONT_TICK,
+                    color=contrast_text_color(color),
+                    clip_on=True,
+                )
+            else:
+                # Alternate above / below; nudge horizontally when many thin
+                # neighbours share nearly the same x.
+                side = 1 if outside_index % 2 == 0 else -1
+                lane = outside_index // 2
+                y_text = y + side * (0.42 + 0.16 * (lane % 3))
+                x_text = center_x + side * (0.004 + 0.003 * (lane % 2)) * total_nm
+                ax.annotate(
+                    text,
+                    xy=(center_x, y),
+                    xytext=(x_text, y_text),
+                    textcoords="data",
+                    ha="center",
+                    va="bottom" if side > 0 else "top",
+                    fontsize=FONT_TICK,
+                    color="#1a1a1a",
+                    arrowprops={
+                        "arrowstyle": "->",
+                        "color": "#555555",
+                        "lw": 0.85,
+                        "shrinkA": 0,
+                        "shrinkB": 1.5,
+                    },
+                    annotation_clip=False,
+                    zorder=5,
+                )
+                outside_index += 1
+        x += w
+
+    if label:
+        ax.text(
+            -0.012 * max(total_nm, 1.0),
+            y,
+            label,
+            ha="right",
+            va="center",
+            fontsize=FONT_LABEL,
+            fontweight="bold",
+            color="#2a2a2a",
+        )
+    return total_nm
 
 
 def materials_used_in_stack(
@@ -571,103 +706,6 @@ def format_layers_caption(
     return "\n".join(lines)
 
 
-def _stack_thickness_label(width_nm: float, frac: float) -> tuple[str, float] | None:
-    """Choose thickness text and font size from segment width.
-
-    Returns ``(label, fontsize)`` without units, or ``None`` when too narrow.
-    """
-    if frac < 0.012:
-        return None
-    if frac >= 0.08:
-        fontsize = FONT_LAYER
-    elif frac >= 0.045:
-        fontsize = FONT_LAYER_SMALL
-    elif frac >= 0.025:
-        fontsize = max(8.0, FONT_LAYER_SMALL - 1.5)
-    else:
-        fontsize = 7.5
-    if width_nm >= 100.0 and frac >= 0.04:
-        text = f"{width_nm:.0f}"
-    elif frac < 0.04 and width_nm >= 1.0:
-        text = f"{width_nm:.0f}"
-    elif width_nm >= 10.0:
-        text = f"{width_nm:.1f}"
-    else:
-        text = f"{width_nm:.2f}"
-    return text, fontsize
-
-
-def draw_stack_thickness(
-    ax,
-    layers: list[tuple[str, float]],
-    *,
-    label: str = "",
-    y: float = 0.0,
-    height: float = 0.78,
-    show_values: bool = True,
-) -> float:
-    """Draw one horizontal stacked bar of physical thicknesses (nm).
-
-    Thickness numbers are drawn without units and scaled to segment width.
-    Returns total thickness in nm (0 if empty).
-    """
-    if not layers:
-        ax.text(
-            0.5,
-            y,
-            "(no layers)",
-            ha="center",
-            va="center",
-            fontsize=FONT_LABEL,
-            transform=ax.get_yaxis_transform(),
-        )
-        return 0.0
-
-    total_nm = sum(d for _, d in layers) / _NM
-    x = 0.0
-    for mat, d in layers:
-        w = d / _NM
-        color = layer_face_color(mat)
-        ax.barh(
-            y,
-            w,
-            left=x,
-            height=height,
-            color=color,
-            edgecolor="#5a5a5a",
-            linewidth=0.7,
-            align="center",
-        )
-        if show_values and total_nm > 0:
-            label_info = _stack_thickness_label(w, w / total_nm)
-            if label_info is not None:
-                text, fontsize = label_info
-                ax.text(
-                    x + 0.5 * w,
-                    y,
-                    text,
-                    ha="center",
-                    va="center",
-                    fontsize=fontsize,
-                    color=contrast_text_color(color),
-                    clip_on=True,
-                )
-        x += w
-
-    if label:
-        ax.text(
-            -0.012 * max(total_nm, 1.0),
-            y,
-            label,
-            ha="right",
-            va="center",
-            fontsize=FONT_LABEL,
-            fontweight="bold",
-            color="#2a2a2a",
-        )
-    return total_nm
-
-
 def _layers_list_text(layers: list[tuple[str, float]]) -> str:
     """Compact readable layer list for under the thickness bar."""
     parts = [f"{i}.{mat} {d / _NM:.1f}" for i, (mat, d) in enumerate(layers, 1)]
@@ -709,7 +747,8 @@ def plot_stack_panel(
 
     xmax = max(totals) if totals else 1.0
     ax.set_xlim(0.0, xmax * 1.02 if xmax > 0 else 1.0)
-    ax.set_ylim(-0.95, len(rows) - 0.22)
+    # Extra vertical room for outside thickness arrows on thin layers.
+    ax.set_ylim(-1.25, len(rows) - 0.05)
     ax.set_yticks([])
 
     parts = []
