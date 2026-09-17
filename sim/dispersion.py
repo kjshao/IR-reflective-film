@@ -347,6 +347,11 @@ def sio2_pvd(wl: float) -> complex:
     return _interp_nk(_load_nk_table("sio2_pvd_lemarchand.csv"), wl * 1e6)
 
 
+def tfcalc_sio2(wl: float) -> complex:
+    """TFCalc SiO₂ tabulated optical constants (0.31–2.066 µm)."""
+    return _interp_nk(_load_nk_table("tfcalc_sio2.csv"), wl * 1e6)
+
+
 def tio2_pvd(wl: float) -> complex:
     """RF-sputtered TiO₂ film (NIST Wang 2014) — default PVD high-index.
 
@@ -403,6 +408,16 @@ def tio2_rutile(wl: float) -> complex:
     return complex(n, k)
 
 
+def tfcalc_tio2_a(wl: float) -> complex:
+    """TFCalc anatase TiO₂ tabulated optical constants (0.30–1.80 µm)."""
+    return _interp_nk(_load_nk_table("tfcalc_tio2_a.csv"), wl * 1e6)
+
+
+def tfcalc_tio2_rutile(wl: float) -> complex:
+    """TFCalc rutile TiO₂ tabulated optical constants (0.30–1.80 µm)."""
+    return _interp_nk(_load_nk_table("tfcalc_tio2_rutile.csv"), wl * 1e6)
+
+
 def tio2(wl: float) -> complex:
     """Default TiO₂ for PVD stacks → ``tio2_pvd`` (RF-sputtered)."""
     return tio2_pvd(wl)
@@ -443,6 +458,7 @@ MATERIALS = {
     "sio2": sio2,
     "sio2_fused": sio2_fused,
     "sio2_pvd": sio2_pvd,
+    "tfcalc_sio2": tfcalc_sio2,
     "tio2": tio2,
     "tio2_pvd": tio2_pvd,
     "tio2_sputter": tio2_pvd,
@@ -450,6 +466,8 @@ MATERIALS = {
     "tio2_amorphous": tio2_amorphous,
     "tio2_a": tio2_a,
     "tio2_rutile": tio2_rutile,
+    "tfcalc_tio2_a": tfcalc_tio2_a,
+    "tfcalc_tio2_rutile": tfcalc_tio2_rutile,
     "glass": glass,
     "pet": pet,
 }

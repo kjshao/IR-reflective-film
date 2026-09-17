@@ -21,6 +21,9 @@ under explicit keys. Numeric tables are derived from the public-domain
 | `tio2_amorphous` | Amorphous TiO₂ | Jolivet et al. 2023 @ 200 °C | ALD; NIR Sellmeier beyond ~0.82 µm |
 | `tio2_a` / `tio2-a` | Anatase TiO₂ | Jolivet et al. 2023 @ 300 °C | annealed crystalline film; higher n than as-deposited PVD |
 | `tio2_rutile` | Rutile (ordinary) | Jellison 2024 + Bond 1965 | **crystal upper bound**, not typical as-deposited PVD |
+| `tfcalc_sio2` / `tfcalc-sio2` | SiO₂ | User-supplied TFCalc table | tabulated 0.310–2.066 µm |
+| `tfcalc_tio2_a` / `tfcalc-tio2-a` | Anatase TiO₂ | User-supplied TFCalc table | tabulated 0.300–1.800 µm |
+| `tfcalc_tio2_rutile` / `tfcalc-tio2-rutile` | Rutile TiO₂ | User-supplied TFCalc table | tabulated 0.300–1.800 µm |
 | `ag` | Evaporated Ag | McPeak et al. 2015 | template-stripped thermal Ag; ~0.30–1.70 µm |
 | `ito` | Commercial ITO | König et al. 2014 + Drude NIR | 72 nm on BK7 to 1 µm; λ>1 µm → moderate-carrier Drude |
 | `glass` | Cover glass | Schott AF32eco | alumino-borosilicate; n≈1.51 @ 590 nm |
@@ -55,6 +58,9 @@ Typical VIS indices used here:
 | `tio2_amorphous_jolivet.csv` | `tio2_amorphous` |
 | `tio2_a_jolivet.csv` | `tio2_a` |
 | `tio2_rutile_bond_o.csv` | `tio2_rutile` (NIR n) |
+| `tfcalc_sio2.csv` | `tfcalc_sio2` |
+| `tfcalc_tio2_a.csv` | `tfcalc_tio2_a` |
+| `tfcalc_tio2_rutile.csv` | `tfcalc_tio2_rutile` |
 | `ag_mcpeak.csv` | `ag` |
 | `ito_konig.csv` | `ito` (≤1 µm) |
 | `glass_af32eco_k.csv` | `glass` (k only) |
