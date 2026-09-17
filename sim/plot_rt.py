@@ -155,6 +155,11 @@ def apply_plot_style() -> None:
             "xtick.labelsize": FONT_TICK,
             "ytick.labelsize": FONT_TICK,
             "legend.fontsize": FONT_LEGEND,
+            "legend.frameon": False,
+            "legend.fancybox": False,
+            "legend.framealpha": 0.0,
+            "legend.edgecolor": "none",
+            "legend.facecolor": "none",
             "figure.facecolor": "white",
             "axes.facecolor": "#fbfaf8",
             "axes.edgecolor": "#6e6e6e",
@@ -429,6 +434,26 @@ def _format_stack_thickness(width_nm: float) -> str:
     return f"{width_nm:.2f}"
 
 
+def style_legend(ax, *args, **kwargs):
+    """Place a frameless legend that does not obscure curves or labels."""
+    options = {
+        "fontsize": FONT_LEGEND,
+        "frameon": False,
+        "loc": "best",
+        "borderaxespad": 0.4,
+    }
+    options.update(kwargs)
+    options["frameon"] = False
+    leg = ax.legend(*args, **options)
+    if leg is not None:
+        frame = leg.get_frame()
+        frame.set_visible(False)
+        frame.set_alpha(0.0)
+        frame.set_facecolor("none")
+        frame.set_edgecolor("none")
+    return leg
+
+
 def draw_stack_thickness(
     ax,
     layers: list[tuple[str, float]],
@@ -437,11 +462,13 @@ def draw_stack_thickness(
     y: float = 0.0,
     height: float = 0.78,
     show_values: bool = True,
+    label_side: int | None = None,
 ) -> float:
     """Draw one horizontal stacked bar of physical thicknesses (nm).
 
     Thickness numbers use the same font size as R/T labels. Thin layers are
-    labeled outside the bar with an arrow. Returns total thickness in nm.
+    labeled just outside the bar edge with an arrow, still inside the axes
+    frame. Returns total thickness in nm.
     """
     if not layers:
         ax.text(
@@ -487,12 +514,14 @@ def draw_stack_thickness(
                     clip_on=True,
                 )
             else:
-                # Point straight to the top/bottom edge of the bar so the
-                # arrow never cuts through the layer interior.
-                side = 1 if outside_index % 2 == 0 else -1
-                lane = outside_index // 2
+                # Stay inside the axes: short vertical callouts to the bar edge.
+                if label_side is None:
+                    side = 1 if outside_index % 2 == 0 else -1
+                else:
+                    side = 1 if label_side >= 0 else -1
+                lane = outside_index // (1 if label_side is not None else 2)
                 y_edge = y + side * (0.5 * height)
-                y_text = y_edge + side * (0.22 + 0.18 * lane)
+                y_text = y_edge + side * (0.08 + 0.09 * min(lane, 2))
                 ax.annotate(
                     text,
                     xy=(center_x, y_edge),
@@ -509,23 +538,13 @@ def draw_stack_thickness(
                         "shrinkA": 0,
                         "shrinkB": 0,
                     },
-                    annotation_clip=False,
+                    annotation_clip=True,
+                    clip_on=True,
                     zorder=5,
                 )
                 outside_index += 1
         x += w
 
-    if label:
-        ax.text(
-            -0.012 * max(total_nm, 1.0),
-            y,
-            label,
-            ha="right",
-            va="center",
-            fontsize=FONT_LABEL,
-            fontweight="bold",
-            color="#2a2a2a",
-        )
     return total_nm
 
 
@@ -642,12 +661,8 @@ def plot_used_nk(
     hdr = title or f"Optical constants used in TMM  (nk_source={source_label})"
     style_axes(axes[0], title=hdr, ylabel="n")
     style_axes(axes[1], xlabel="Wavelength (nm)", ylabel="k")
-    axes[0].legend(
-        loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8"
-    )
-    axes[1].legend(
-        loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8"
-    )
+    style_legend(axes[0], loc="upper left", bbox_to_anchor=(1.01, 1.0))
+    style_legend(axes[1], loc="upper left", bbox_to_anchor=(1.01, 1.0))
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -683,9 +698,7 @@ def plot_nk_panel(
         xlabel="Wavelength (nm)",
         ylabel="k" if is_k else "n",
     )
-    ax.legend(
-        loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8"
-    )
+    style_legend(ax, loc="upper left", bbox_to_anchor=(1.01, 1.0))
 
 
 def format_layers_caption(
@@ -736,20 +749,40 @@ def plot_stack_panel(
         ax.set_axis_off()
         return
 
+    height = 0.58
     totals: list[float] = []
+    y_positions: list[float] = []
+    row_labels: list[str] = []
     for i, (label, lyrs) in enumerate(rows):
         y = float(len(rows) - 1 - i)
+        # Top row: callouts above; bottom row: callouts below; keep inside frame.
+        if len(rows) == 1:
+            label_side = None
+        elif i == 0:
+            label_side = 1
+        else:
+            label_side = -1
         totals.append(
             draw_stack_thickness(
-                ax, lyrs, label=label, y=y, height=0.7, show_values=True
+                ax,
+                lyrs,
+                y=y,
+                height=height,
+                show_values=True,
+                label_side=label_side,
             )
         )
+        y_positions.append(y)
+        row_labels.append(label)
 
     xmax = max(totals) if totals else 1.0
-    ax.set_xlim(0.0, xmax * 1.02 if xmax > 0 else 1.0)
-    # Extra vertical room for outside thickness arrows on thin layers.
-    ax.set_ylim(-1.45, len(rows) + 0.15)
-    ax.set_yticks([])
+    # Extra right pad so end-of-bar callouts stay inside the axes frame.
+    ax.set_xlim(0.0, xmax * 1.06 if xmax > 0 else 1.0)
+    # Compact limits so all labels remain inside the axes frame.
+    half = 0.5 * height
+    ax.set_ylim(min(y_positions) - half - 0.48, max(y_positions) + half + 0.48)
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(row_labels, fontsize=FONT_LABEL, fontweight="bold")
 
     parts = []
     for label, lyrs in rows:
@@ -763,7 +796,6 @@ def plot_stack_panel(
     ax.grid(True, axis="x", alpha=0.28, color="#9a9a9a", linewidth=0.8)
     ax.grid(False, axis="y")
 
-    # Legend outside the axes so it never covers thickness numbers.
     seen: dict[str, tuple[str, str]] = {}
     for _, lyrs in rows:
         for mat, _ in lyrs:
@@ -777,14 +809,12 @@ def plot_stack_panel(
             Patch(facecolor=color, edgecolor="#5a5a5a", label=label)
             for label, color in seen.values()
         ]
-        ax.legend(
+        # Outside the axes so thickness labels stay unobscured.
+        style_legend(
+            ax,
             handles=handles,
-            loc="upper left",
-            bbox_to_anchor=(1.01, 1.0),
-            borderaxespad=0.0,
-            fontsize=FONT_LEGEND,
-            framealpha=0.95,
-            edgecolor="#c8c8c8",
+            loc="center left",
+            bbox_to_anchor=(1.01, 0.5),
             ncol=1,
         )
 
@@ -929,7 +959,8 @@ def plot_results(
         R_before=R_before,
         T_before=T_before,
     )
-    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
+    # Outside axes: keep clear of band-mean labels and R/T curves.
+    style_legend(ax, loc="upper left", bbox_to_anchor=(1.01, 1.0))
 
     ax = axes[1]
     ax.plot(
@@ -963,7 +994,7 @@ def plot_results(
         bands,
         R_before=R_before,
     )
-    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
+    style_legend(ax, loc="upper left", bbox_to_anchor=(1.01, 1.0))
 
     row = 2
     if has_stack:
@@ -1014,7 +1045,7 @@ def plot_results(
             xlabel="Wavelength (nm)",
             ylabel="n",
         )
-        ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
+        style_legend(ax, loc="upper left", bbox_to_anchor=(1.01, 1.0))
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1150,7 +1181,7 @@ def plot_rt(
                     linestyles=":",
                     lw=1.2,
                 )
-    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
+    style_legend(ax, loc="upper left", bbox_to_anchor=(1.01, 1.0))
     style_axes(ax, title=title, ylabel="R, T, A (%)")
     style_percent_yaxis(ax)
     annotate_band_means(ax, wavelengths_m, R, T, bands)
@@ -1159,7 +1190,7 @@ def plot_rt(
     ax.plot(wl_nm, [100 * r for r in R], color=COLOR_R, lw=LINEWIDTH, label="R")
     ax.plot(wl_nm, [100 * t for t in T], color=COLOR_T, lw=LINEWIDTH, label="T")
     shade_bands(ax, bands)
-    ax.legend(loc="best", fontsize=FONT_LEGEND, framealpha=0.92, edgecolor="#c8c8c8")
+    style_legend(ax, loc="upper left", bbox_to_anchor=(1.01, 1.0))
     style_axes(ax, xlabel="Wavelength (nm)", ylabel="R, T (%)")
     style_percent_yaxis(ax)
     annotate_band_means(ax, wavelengths_m, R, T, bands)

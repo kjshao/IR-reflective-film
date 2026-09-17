@@ -88,6 +88,7 @@ from plot_rt import (
     plot_rt,
     plot_used_nk,
     sample_nk_curves,
+    style_legend,
     write_band_stats_csv,
     write_nk_csv,
     write_spectrum_csv,
@@ -806,7 +807,7 @@ def write_layer_search_candidate_outputs(
             ylim=(0.0, 100.0),
         )
         ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", ncol=2)
+        style_legend(ax, loc="upper left", bbox_to_anchor=(1.01, 1.0), ncol=1)
         fig.tight_layout()
         overlay_path = os.path.join(out_dir, "layer_search_candidates_rt.png")
         fig.savefig(overlay_path, dpi=180, bbox_inches="tight")
