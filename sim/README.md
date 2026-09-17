@@ -326,6 +326,10 @@ sim/.venv/bin/python sim/multistart_optimize.py \
 # 文本膜系 R/T 光谱
 sim/.venv/bin/python sim/plot_rt_txt.py sim/examples/example_stack.txt 400 1800
 
+# 可重复传入窗口，统计并在图中标注各窗口的平均 R/T
+sim/.venv/bin/python sim/plot_rt_txt.py sim/examples/example_stack.txt 400 1800 \
+  --window 400 700 --window 780 1800
+
 # JSON 膜系（材料库色散）R/T 光谱
 sim/.venv/bin/python sim/plot_rt.py sim/examples/example_plot_rt.json
 ```

@@ -4,6 +4,8 @@ Usage::
 
     python3 sim/plot_rt_txt.py sim/examples/example_stack.txt 400 1800
     python3 sim/plot_rt_txt.py stack.txt 420 1800 --step 5 --angle 0
+    python3 sim/plot_rt_txt.py stack.txt 300 1800 \
+        --window 400 700 --window 780 1800
 
 Stack file format (whitespace-separated; ``#`` comments allowed)::
 
@@ -30,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dispersion as dsp
 import tmm
+from lm_optimizer import BandSpec
 from plot_rt import close_all_figures, configure_matplotlib, dense_grid_nm, plot_rt, write_spectrum_csv
 from rt_calculator import make_calculator
 
@@ -140,6 +143,69 @@ def compute_spectrum(
     return rs, ts
 
 
+def validate_windows(
+    windows_nm: list[tuple[float, float]] | None,
+    wl_lo_nm: float,
+    wl_hi_nm: float,
+) -> list[tuple[float, float]]:
+    """Validate optional closed wavelength windows inside the plotted range."""
+    result: list[tuple[float, float]] = []
+    for lo, hi in windows_nm or []:
+        lo, hi = float(lo), float(hi)
+        if not math.isfinite(lo) or not math.isfinite(hi) or lo >= hi:
+            raise SystemExit(f"window invalid: {lo:g} .. {hi:g}")
+        if lo < wl_lo_nm or hi > wl_hi_nm:
+            raise SystemExit(
+                f"window {lo:g}–{hi:g} nm is outside plotted range "
+                f"{wl_lo_nm:g}–{wl_hi_nm:g} nm"
+            )
+        result.append((lo, hi))
+    return result
+
+
+def window_average_stats(
+    wavelengths_m: list[float],
+    R: list[float],
+    T: list[float],
+    windows_nm: list[tuple[float, float]],
+) -> list[dict[str, float | int]]:
+    """Mean sampled R and T in each closed wavelength window."""
+    rows: list[dict[str, float | int]] = []
+    for lo_nm, hi_nm in windows_nm:
+        indices = [
+            i
+            for i, wavelength in enumerate(wavelengths_m)
+            if lo_nm <= wavelength / _NM <= hi_nm
+        ]
+        if not indices:
+            raise SystemExit(
+                f"window {lo_nm:g}–{hi_nm:g} nm contains no sampled wavelengths"
+            )
+        rows.append(
+            {
+                "wl_lo_nm": lo_nm,
+                "wl_hi_nm": hi_nm,
+                "sample_count": len(indices),
+                "R_mean": sum(R[i] for i in indices) / len(indices),
+                "T_mean": sum(T[i] for i in indices) / len(indices),
+            }
+        )
+    return rows
+
+
+def write_window_stats_csv(
+    path: str,
+    rows: list[dict[str, float | int]],
+) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("window,wl_lo_nm,wl_hi_nm,sample_count,R_mean,T_mean\n")
+        for index, row in enumerate(rows, 1):
+            fh.write(
+                f"{index},{row['wl_lo_nm']:.6g},{row['wl_hi_nm']:.6g},"
+                f"{row['sample_count']},{row['R_mean']:.9g},{row['T_mean']:.9g}\n"
+            )
+
+
 def run(
     stack_path: str,
     wl_lo_nm: float,
@@ -150,11 +216,13 @@ def run(
     polarization: str = "unpolarized",
     out_dir: str | None = None,
     nk_source: str = "library",
+    windows_nm: list[tuple[float, float]] | None = None,
 ) -> int:
     if wl_hi_nm <= wl_lo_nm:
         raise SystemExit(f"wavelength range invalid: {wl_lo_nm} .. {wl_hi_nm}")
     if step_nm <= 0:
         raise SystemExit(f"step must be > 0, got {step_nm}")
+    windows = validate_windows(windows_nm, wl_lo_nm, wl_hi_nm)
 
     incident, films, substrate = load_stack_txt(stack_path)
     plot_wls = [x * _NM for x in dense_grid_nm(wl_lo_nm, wl_hi_nm, step_nm)]
@@ -204,20 +272,39 @@ def run(
     else:
         print(f"  substrate: {substrate.material}  n={substrate.n:g}  k={substrate.k:g}")
 
+    window_rows = window_average_stats(plot_wls, R, T, windows)
+    if window_rows:
+        print("  window averages:")
+        for row in window_rows:
+            print(
+                f"    {row['wl_lo_nm']:g}–{row['wl_hi_nm']:g} nm: "
+                f"R_mean={100 * row['R_mean']:.3f}%  "
+                f"T_mean={100 * row['T_mean']:.3f}%  "
+                f"(samples={row['sample_count']})"
+            )
+
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, "spectrum.csv")
     plot_path = os.path.join(out_dir, "rt_spectrum.png")
+    window_csv_path = os.path.join(out_dir, "window_stats.csv")
     write_spectrum_csv(csv_path, plot_wls, R, T)
+    if window_rows:
+        write_window_stats_csv(window_csv_path, window_rows)
     plot_rt(
         plot_path,
         plot_wls,
         R,
         T,
-        bands=[],
+        bands=[
+            BandSpec(wl_lo=lo_nm * _NM, wl_hi=hi_nm * _NM)
+            for lo_nm, hi_nm in windows
+        ],
         title=f"{os.path.basename(stack_path)}  ({wl_lo_nm:g}–{wl_hi_nm:g} nm)",
         layers=[(f.material, f.thickness_m) for f in films],
     )
     print(f"\n  wrote {csv_path}")
+    if window_rows:
+        print(f"  wrote {window_csv_path}")
     print(f"  wrote {plot_path}")
     close_all_figures()
     return 0
@@ -271,6 +358,15 @@ def main(argv: list[str] | None = None) -> int:
         help="library=dispersion DB by material name (default); "
         "fixed=use n,k columns from the stack file",
     )
+    ap.add_argument(
+        "--window",
+        nargs=2,
+        action="append",
+        type=float,
+        default=None,
+        metavar=("WL_MIN", "WL_MAX"),
+        help="closed wavelength window in nm for mean R/T; may be repeated",
+    )
     args = ap.parse_args(argv)
     return run(
         args.stack,
@@ -281,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
         polarization=args.pol,
         out_dir=args.out_dir,
         nk_source=args.nk_source,
+        windows_nm=args.window,
     )
 
 
