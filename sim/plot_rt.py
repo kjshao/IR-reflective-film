@@ -487,16 +487,16 @@ def draw_stack_thickness(
                     clip_on=True,
                 )
             else:
-                # Alternate above / below; nudge horizontally when many thin
-                # neighbours share nearly the same x.
+                # Point straight to the top/bottom edge of the bar so the
+                # arrow never cuts through the layer interior.
                 side = 1 if outside_index % 2 == 0 else -1
                 lane = outside_index // 2
-                y_text = y + side * (0.42 + 0.16 * (lane % 3))
-                x_text = center_x + side * (0.004 + 0.003 * (lane % 2)) * total_nm
+                y_edge = y + side * (0.5 * height)
+                y_text = y_edge + side * (0.22 + 0.18 * lane)
                 ax.annotate(
                     text,
-                    xy=(center_x, y),
-                    xytext=(x_text, y_text),
+                    xy=(center_x, y_edge),
+                    xytext=(center_x, y_text),
                     textcoords="data",
                     ha="center",
                     va="bottom" if side > 0 else "top",
@@ -507,7 +507,7 @@ def draw_stack_thickness(
                         "color": "#555555",
                         "lw": 0.85,
                         "shrinkA": 0,
-                        "shrinkB": 1.5,
+                        "shrinkB": 0,
                     },
                     annotation_clip=False,
                     zorder=5,
@@ -748,7 +748,7 @@ def plot_stack_panel(
     xmax = max(totals) if totals else 1.0
     ax.set_xlim(0.0, xmax * 1.02 if xmax > 0 else 1.0)
     # Extra vertical room for outside thickness arrows on thin layers.
-    ax.set_ylim(-1.25, len(rows) - 0.05)
+    ax.set_ylim(-1.45, len(rows) + 0.15)
     ax.set_yticks([])
 
     parts = []
@@ -763,7 +763,7 @@ def plot_stack_panel(
     ax.grid(True, axis="x", alpha=0.28, color="#9a9a9a", linewidth=0.8)
     ax.grid(False, axis="y")
 
-    # Legend for materials present (unique, first-appearance label + color).
+    # Legend outside the axes so it never covers thickness numbers.
     seen: dict[str, tuple[str, str]] = {}
     for _, lyrs in rows:
         for mat, _ in lyrs:
@@ -779,11 +779,13 @@ def plot_stack_panel(
         ]
         ax.legend(
             handles=handles,
-            loc="lower right",
+            loc="upper left",
+            bbox_to_anchor=(1.01, 1.0),
+            borderaxespad=0.0,
             fontsize=FONT_LEGEND,
             framealpha=0.95,
             edgecolor="#c8c8c8",
-            ncol=min(4, len(handles)),
+            ncol=1,
         )
 
 
