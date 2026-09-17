@@ -46,32 +46,33 @@ COLOR_R = "#3d6f9c"  # soft slate blue
 COLOR_T = "#c17a3a"  # soft amber
 COLOR_A = "#6a8f6a"  # sage green
 
-# Layer bar fills: same soft blue / warm yellow as band shading backgrounds.
+# Layer bar / legend fills: distinct from R/T curves and band shading.
+# One stable color per material so stack bars and legends always match.
 _LAYER_FACE_COLORS = {
-    "tio2": "#d9e8f5",
-    "tio2_pvd": "#d9e8f5",
-    "tio2_eb": "#cfe0f0",
-    "tio2_amorphous": "#e0eef8",
-    "tio2_a": "#d9e8f5",
-    "tio2_rutile": "#c5d8ea",
-    "sio2": "#f5e6d4",
-    "sio2_fused": "#f5e6d4",
-    "sio2_pvd": "#efdcc8",
-    "ito": "#ddebd8",
-    "ag": "#e8dff0",
-    "glass": "#e8e4dc",
-    "pet": "#f3ecd4",
-    "air": "#f7f7f5",
+    "tio2": "#7aa7c7",
+    "tio2_pvd": "#7aa7c7",
+    "tio2_eb": "#6b97b8",
+    "tio2_amorphous": "#8bb4cf",
+    "tio2_a": "#7aa7c7",
+    "tio2_rutile": "#5f8aab",
+    "sio2": "#c9a46c",
+    "sio2_fused": "#c9a46c",
+    "sio2_pvd": "#bb955c",
+    "ito": "#7f9f78",
+    "ag": "#a888b0",
+    "glass": "#9e9486",
+    "pet": "#b7a56e",
+    "air": "#d7d5d1",
 }
 _LAYER_FALLBACK = (
-    "#d9e8f5",
-    "#f5e6d4",
-    "#ddebd8",
-    "#e8dff0",
-    "#f3ecd4",
-    "#f0dde3",
-    "#d8ebe7",
-    "#e8e4dc",
+    "#7aa7c7",
+    "#c9a46c",
+    "#7f9f78",
+    "#a888b0",
+    "#b7a56e",
+    "#c48b8b",
+    "#6f9e97",
+    "#9e9486",
 )
 
 # Typography — keep readable on saved PNGs (dpi=150).
@@ -374,10 +375,23 @@ def dense_grid_nm(lo_nm: float, hi_nm: float, step_nm: float) -> list[float]:
 
 
 def layer_face_color(material: str, index: int = 0) -> str:
-    key = str(material).lower().replace("-", "_")
+    """Return the fill color for a material.
+
+    Color depends only on the material identity so stack bars and legends
+    stay consistent. ``index`` is accepted for call-site compatibility but
+    ignored.
+    """
+    del index  # color must not depend on layer position
+    key = dsp.normalize_material_name(material)
     if key in _LAYER_FACE_COLORS:
         return _LAYER_FACE_COLORS[key]
-    return _LAYER_FALLBACK[index % len(_LAYER_FALLBACK)]
+    digest = sum((i + 1) * ord(ch) for i, ch in enumerate(key))
+    return _LAYER_FALLBACK[digest % len(_LAYER_FALLBACK)]
+
+
+def material_line_color(material: str, index: int = 0) -> str:
+    """Stroke color for n/k curves; same identity mapping as stack fills."""
+    return layer_face_color(material, index)
 
 
 def materials_used_in_stack(
@@ -473,7 +487,7 @@ def plot_used_nk(
 
     fig, axes = plt.subplots(2, 1, figsize=(10.5, 8.2), sharex=True)
     for i, name in enumerate(mats):
-        color = layer_face_color(name, i)
+        color = material_line_color(name, i)
         curve = nk_by_material[name]
         axes[0].plot(
             wl_nm,
@@ -523,7 +537,7 @@ def plot_nk_panel(
         ax.plot(
             wl_nm,
             ys,
-            color=layer_face_color(name, i),
+            color=material_line_color(name, i),
             lw=LINEWIDTH,
             label=name,
         )
@@ -557,6 +571,32 @@ def format_layers_caption(
     return "\n".join(lines)
 
 
+def _stack_thickness_label(width_nm: float, frac: float) -> tuple[str, float] | None:
+    """Choose thickness text and font size from segment width.
+
+    Returns ``(label, fontsize)`` without units, or ``None`` when too narrow.
+    """
+    if frac < 0.012:
+        return None
+    if frac >= 0.08:
+        fontsize = FONT_LAYER
+    elif frac >= 0.045:
+        fontsize = FONT_LAYER_SMALL
+    elif frac >= 0.025:
+        fontsize = max(8.0, FONT_LAYER_SMALL - 1.5)
+    else:
+        fontsize = 7.5
+    if width_nm >= 100.0 and frac >= 0.04:
+        text = f"{width_nm:.0f}"
+    elif frac < 0.04 and width_nm >= 1.0:
+        text = f"{width_nm:.0f}"
+    elif width_nm >= 10.0:
+        text = f"{width_nm:.1f}"
+    else:
+        text = f"{width_nm:.2f}"
+    return text, fontsize
+
+
 def draw_stack_thickness(
     ax,
     layers: list[tuple[str, float]],
@@ -568,6 +608,7 @@ def draw_stack_thickness(
 ) -> float:
     """Draw one horizontal stacked bar of physical thicknesses (nm).
 
+    Thickness numbers are drawn without units and scaled to segment width.
     Returns total thickness in nm (0 if empty).
     """
     if not layers:
@@ -584,12 +625,9 @@ def draw_stack_thickness(
 
     total_nm = sum(d for _, d in layers) / _NM
     x = 0.0
-    n = len(layers)
-    # Numbers only inside segments — keeps type large enough to read.
-    min_num_frac = 0.028 if n <= 16 else 0.04
-    for i, (mat, d) in enumerate(layers):
+    for mat, d in layers:
         w = d / _NM
-        color = layer_face_color(mat, i)
+        color = layer_face_color(mat)
         ax.barh(
             y,
             w,
@@ -600,17 +638,20 @@ def draw_stack_thickness(
             linewidth=0.7,
             align="center",
         )
-        if show_values and total_nm > 0 and w / total_nm >= min_num_frac:
-            ax.text(
-                x + 0.5 * w,
-                y,
-                f"{w:.1f}",
-                ha="center",
-                va="center",
-                fontsize=FONT_LAYER,
-                color=contrast_text_color(color),
-                clip_on=True,
-            )
+        if show_values and total_nm > 0:
+            label_info = _stack_thickness_label(w, w / total_nm)
+            if label_info is not None:
+                text, fontsize = label_info
+                ax.text(
+                    x + 0.5 * w,
+                    y,
+                    text,
+                    ha="center",
+                    va="center",
+                    fontsize=fontsize,
+                    color=contrast_text_color(color),
+                    clip_on=True,
+                )
         x += w
 
     if label:
@@ -662,7 +703,7 @@ def plot_stack_panel(
         y = float(len(rows) - 1 - i)
         totals.append(
             draw_stack_thickness(
-                ax, lyrs, label=label, y=y, height=0.7, show_values=False
+                ax, lyrs, label=label, y=y, height=0.7, show_values=True
             )
         )
 
@@ -683,19 +724,19 @@ def plot_stack_panel(
     ax.grid(True, axis="x", alpha=0.28, color="#9a9a9a", linewidth=0.8)
     ax.grid(False, axis="y")
 
-    # Legend for materials present (unique, order of first appearance).
-    seen: dict[str, str] = {}
+    # Legend for materials present (unique, first-appearance label + color).
+    seen: dict[str, tuple[str, str]] = {}
     for _, lyrs in rows:
-        for i, (mat, _) in enumerate(lyrs):
-            key = mat.lower()
+        for mat, _ in lyrs:
+            key = dsp.normalize_material_name(mat)
             if key not in seen:
-                seen[key] = layer_face_color(mat, i)
+                seen[key] = (str(mat), layer_face_color(mat))
     if seen:
         from matplotlib.patches import Patch
 
         handles = [
-            Patch(facecolor=c, edgecolor="#5a5a5a", label=m)
-            for m, c in seen.items()
+            Patch(facecolor=color, edgecolor="#5a5a5a", label=label)
+            for label, color in seen.values()
         ]
         ax.legend(
             handles=handles,
